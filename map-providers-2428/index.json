@@ -1,0 +1,1147 @@
+{
+  "meta": {
+    "baseUrl": "http://localhost:13591",
+    "generatedAt": "2026-11-19T01:19:05.021Z",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "mode": "live",
+    "views": {
+      "mountains": {
+        "label": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10,
+        "nodes": 60
+      },
+      "city": {
+        "label": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11,
+        "nodes": 99
+      }
+    }
+  },
+  "entries": [
+    {
+      "id": "street-carto-light",
+      "file": "street-carto-light.png",
+      "thumb": "thumbs/street-carto-light.png",
+      "title": "Street: Carto (default) (light)",
+      "category": "street",
+      "theme": "light",
+      "provider": "carto-light",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 24,
+        "loaded": 24,
+        "failed": 0,
+        "pending": 0,
+        "requests": 24,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "carto-light": 24
+        },
+        "waitMs": 2017
+      },
+      "vectorPath": null,
+      "resolvedProvider": "carto-light"
+    },
+    {
+      "id": "street-carto-dark",
+      "file": "street-carto-dark.png",
+      "thumb": "thumbs/street-carto-dark.png",
+      "title": "Street: Carto (default) (dark)",
+      "category": "street",
+      "theme": "dark",
+      "provider": "carto-dark",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 24,
+        "loaded": 24,
+        "failed": 0,
+        "pending": 0,
+        "requests": 24,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "carto-dark": 24
+        },
+        "waitMs": 2328
+      },
+      "vectorPath": null,
+      "resolvedProvider": "carto-dark"
+    },
+    {
+      "id": "street-osmfr-hot-light",
+      "file": "street-osmfr-hot-light.png",
+      "thumb": "thumbs/street-osmfr-hot-light.png",
+      "title": "Street: OSM France Humanitarian (light)",
+      "category": "street",
+      "theme": "light",
+      "provider": "osmfr-hot",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 24,
+        "loaded": 24,
+        "failed": 0,
+        "pending": 0,
+        "requests": 24,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "osmfr": 24
+        },
+        "waitMs": 5304
+      },
+      "vectorPath": null,
+      "resolvedProvider": "osmfr-hot"
+    },
+    {
+      "id": "gray-osmfr-light",
+      "file": "gray-osmfr-light.png",
+      "thumb": "thumbs/gray-osmfr-light.png",
+      "title": "Gray: OSM France (light)",
+      "category": "gray",
+      "theme": "light",
+      "provider": "osmfr-gray",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 24,
+        "loaded": 24,
+        "failed": 0,
+        "pending": 0,
+        "requests": 24,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "osmfr": 24
+        },
+        "waitMs": 3523
+      },
+      "vectorPath": null,
+      "resolvedProvider": "osmfr-gray"
+    },
+    {
+      "id": "gray-osmfr-dark",
+      "file": "gray-osmfr-dark.png",
+      "thumb": "thumbs/gray-osmfr-dark.png",
+      "title": "Gray: OSM France (dark)",
+      "category": "gray",
+      "theme": "dark",
+      "provider": "osmfr-gray-dark",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 24,
+        "loaded": 24,
+        "failed": 0,
+        "pending": 0,
+        "requests": 24,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "osmfr": 24
+        },
+        "waitMs": 3799
+      },
+      "vectorPath": null,
+      "resolvedProvider": "osmfr-gray-dark"
+    },
+    {
+      "id": "gray-versatiles-light",
+      "file": "gray-versatiles-light.png",
+      "thumb": "thumbs/gray-versatiles-light.png",
+      "title": "Gray: VersaTiles (light)",
+      "category": "gray",
+      "theme": "light",
+      "provider": "versatiles-gray",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 0,
+        "loaded": 0,
+        "failed": 0,
+        "pending": 0,
+        "requests": 25,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "style:tiles.versatiles.org": 1,
+          "host:tiles.versatiles.org": 24
+        },
+        "waitMs": 1508
+      },
+      "vectorPath": "maplibre-gl",
+      "resolvedProvider": "versatiles-gray"
+    },
+    {
+      "id": "gray-versatiles-dark",
+      "file": "gray-versatiles-dark.png",
+      "thumb": "thumbs/gray-versatiles-dark.png",
+      "title": "Gray: VersaTiles (dark)",
+      "category": "gray",
+      "theme": "dark",
+      "provider": "versatiles-gray-dark",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 0,
+        "loaded": 0,
+        "failed": 0,
+        "pending": 0,
+        "requests": 25,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "style:tiles.versatiles.org": 1,
+          "host:tiles.versatiles.org": 24
+        },
+        "waitMs": 1509
+      },
+      "vectorPath": "maplibre-gl",
+      "resolvedProvider": "versatiles-gray-dark"
+    },
+    {
+      "id": "gray-openfreemap-light",
+      "file": "gray-openfreemap-light.png",
+      "thumb": "thumbs/gray-openfreemap-light.png",
+      "title": "Gray: OpenFreeMap Positron (light)",
+      "category": "gray",
+      "theme": "light",
+      "provider": "openfreemap-positron",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 0,
+        "loaded": 0,
+        "failed": 0,
+        "pending": 0,
+        "requests": 19,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "openfreemap-style": 1,
+          "openfreemap": 18
+        },
+        "waitMs": 1595
+      },
+      "vectorPath": "maplibre-gl",
+      "resolvedProvider": "openfreemap-positron"
+    },
+    {
+      "id": "gray-openfreemap-dark",
+      "file": "gray-openfreemap-dark.png",
+      "thumb": "thumbs/gray-openfreemap-dark.png",
+      "title": "Gray: OpenFreeMap Dark (dark)",
+      "category": "gray",
+      "theme": "dark",
+      "provider": "openfreemap-dark",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 0,
+        "loaded": 0,
+        "failed": 0,
+        "pending": 0,
+        "requests": 18,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "openfreemap-style": 1,
+          "openfreemap": 17
+        },
+        "waitMs": 1572
+      },
+      "vectorPath": "maplibre-gl",
+      "resolvedProvider": "openfreemap-dark"
+    },
+    {
+      "id": "topo-cyclosm-light",
+      "file": "topo-cyclosm-light.png",
+      "thumb": "thumbs/topo-cyclosm-light.png",
+      "title": "Topo: CyclOSM (light)",
+      "category": "topo",
+      "theme": "light",
+      "provider": "osmfr-cyclosm",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 24,
+        "loaded": 24,
+        "failed": 0,
+        "pending": 0,
+        "requests": 24,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "host:b.tile-cyclosm.openstreetmap.fr": 8,
+          "host:c.tile-cyclosm.openstreetmap.fr": 8,
+          "host:a.tile-cyclosm.openstreetmap.fr": 8
+        },
+        "waitMs": 4791
+      },
+      "vectorPath": null,
+      "resolvedProvider": "osmfr-cyclosm"
+    },
+    {
+      "id": "topo-eox-terrain-light",
+      "file": "topo-eox-terrain-light.png",
+      "thumb": "thumbs/topo-eox-terrain-light.png",
+      "title": "Topo: EOX Terrain Light (light)",
+      "category": "topo",
+      "theme": "light",
+      "provider": "eox-terrain-light",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 24,
+        "loaded": 24,
+        "failed": 0,
+        "pending": 0,
+        "requests": 24,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "eox": 24
+        },
+        "waitMs": 11557
+      },
+      "vectorPath": null,
+      "resolvedProvider": "eox-terrain-light"
+    },
+    {
+      "id": "topo-opentopomap-light",
+      "file": "topo-opentopomap-light.png",
+      "thumb": "thumbs/topo-opentopomap-light.png",
+      "title": "Topo: OpenTopoMap (opt-in) (light)",
+      "category": "topo",
+      "theme": "light",
+      "provider": "opentopomap",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 24,
+        "loaded": 24,
+        "failed": 0,
+        "pending": 0,
+        "requests": 24,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "opentopomap": 24
+        },
+        "waitMs": 5290
+      },
+      "vectorPath": null,
+      "resolvedProvider": "opentopomap"
+    },
+    {
+      "id": "sat-s2-2025-light",
+      "file": "sat-s2-2025-light.png",
+      "thumb": "thumbs/sat-s2-2025-light.png",
+      "title": "Satellite: Sentinel-2 2025 (light)",
+      "category": "satellite",
+      "theme": "light",
+      "provider": "eox-s2-2025",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 24,
+        "loaded": 24,
+        "failed": 0,
+        "pending": 0,
+        "requests": 24,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "eox": 24
+        },
+        "waitMs": 5035
+      },
+      "vectorPath": null,
+      "resolvedProvider": "eox-s2-2025"
+    },
+    {
+      "id": "sat-s2-2025-labels-light",
+      "file": "sat-s2-2025-labels-light.png",
+      "thumb": "thumbs/sat-s2-2025-labels-light.png",
+      "title": "Satellite: Sentinel-2 2025 with labels (light)",
+      "category": "satellite",
+      "theme": "light",
+      "provider": "eox-s2-2025",
+      "overlays": [
+        "eox-labels"
+      ],
+      "route": "#/map",
+      "view": {
+        "name": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 48,
+        "loaded": 48,
+        "failed": 0,
+        "pending": 0,
+        "requests": 48,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "eox": 48
+        },
+        "waitMs": 6808
+      },
+      "vectorPath": null,
+      "resolvedProvider": "eox-s2-2025"
+    },
+    {
+      "id": "sat-s2-2025-dark",
+      "file": "sat-s2-2025-dark.png",
+      "thumb": "thumbs/sat-s2-2025-dark.png",
+      "title": "Satellite: Sentinel-2 2025 (dark)",
+      "category": "satellite",
+      "theme": "dark",
+      "provider": "eox-s2-2025",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 24,
+        "loaded": 24,
+        "failed": 0,
+        "pending": 0,
+        "requests": 24,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "eox": 24
+        },
+        "waitMs": 4524
+      },
+      "vectorPath": null,
+      "resolvedProvider": "eox-s2-2025"
+    },
+    {
+      "id": "sat-s2-2025-labels-dark",
+      "file": "sat-s2-2025-labels-dark.png",
+      "thumb": "thumbs/sat-s2-2025-labels-dark.png",
+      "title": "Satellite: Sentinel-2 2025 with labels (dark)",
+      "category": "satellite",
+      "theme": "dark",
+      "provider": "eox-s2-2025",
+      "overlays": [
+        "eox-labels"
+      ],
+      "route": "#/map",
+      "view": {
+        "name": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 48,
+        "loaded": 48,
+        "failed": 0,
+        "pending": 0,
+        "requests": 48,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "eox": 48
+        },
+        "waitMs": 6812
+      },
+      "vectorPath": null,
+      "resolvedProvider": "eox-s2-2025"
+    },
+    {
+      "id": "sat-s2-2016-light",
+      "file": "sat-s2-2016-light.png",
+      "thumb": "thumbs/sat-s2-2016-light.png",
+      "title": "Satellite: Sentinel-2 2016 (light)",
+      "category": "satellite",
+      "theme": "light",
+      "provider": "eox-s2-2016",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 24,
+        "loaded": 24,
+        "failed": 0,
+        "pending": 0,
+        "requests": 24,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "eox": 24
+        },
+        "waitMs": 4525
+      },
+      "vectorPath": null,
+      "resolvedProvider": "eox-s2-2016"
+    },
+    {
+      "id": "sat-s2-2016-labels-light",
+      "file": "sat-s2-2016-labels-light.png",
+      "thumb": "thumbs/sat-s2-2016-labels-light.png",
+      "title": "Satellite: Sentinel-2 2016 with labels (light)",
+      "category": "satellite",
+      "theme": "light",
+      "provider": "eox-s2-2016",
+      "overlays": [
+        "eox-labels"
+      ],
+      "route": "#/map",
+      "view": {
+        "name": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 48,
+        "loaded": 48,
+        "failed": 0,
+        "pending": 0,
+        "requests": 48,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "eox": 48
+        },
+        "waitMs": 6814
+      },
+      "vectorPath": null,
+      "resolvedProvider": "eox-s2-2016"
+    },
+    {
+      "id": "vector-liberty-light",
+      "file": "vector-liberty-light.png",
+      "thumb": "thumbs/vector-liberty-light.png",
+      "title": "Vector: OpenFreeMap Liberty (light)",
+      "category": "vector",
+      "theme": "light",
+      "provider": "openfreemap-liberty",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 0,
+        "loaded": 0,
+        "failed": 0,
+        "pending": 0,
+        "requests": 19,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "openfreemap-style": 1,
+          "openfreemap": 18
+        },
+        "waitMs": 1505
+      },
+      "vectorPath": "maplibre-gl",
+      "resolvedProvider": "openfreemap-liberty"
+    },
+    {
+      "id": "vector-dark-dark",
+      "file": "vector-dark-dark.png",
+      "thumb": "thumbs/vector-dark-dark.png",
+      "title": "Vector: OpenFreeMap Dark (dark)",
+      "category": "vector",
+      "theme": "dark",
+      "provider": "openfreemap-dark",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 0,
+        "loaded": 0,
+        "failed": 0,
+        "pending": 0,
+        "requests": 18,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "openfreemap-style": 1,
+          "openfreemap": 17
+        },
+        "waitMs": 1586
+      },
+      "vectorPath": "maplibre-gl",
+      "resolvedProvider": "openfreemap-dark"
+    },
+    {
+      "id": "vector-versatiles-colorful-light",
+      "file": "vector-versatiles-colorful-light.png",
+      "thumb": "thumbs/vector-versatiles-colorful-light.png",
+      "title": "Vector: VersaTiles Colorful (light)",
+      "category": "vector",
+      "theme": "light",
+      "provider": "versatiles-colorful",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 0,
+        "loaded": 0,
+        "failed": 0,
+        "pending": 0,
+        "requests": 25,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "style:tiles.versatiles.org": 1,
+          "host:tiles.versatiles.org": 24
+        },
+        "waitMs": 1509
+      },
+      "vectorPath": "maplibre-gl",
+      "resolvedProvider": "versatiles-colorful"
+    },
+    {
+      "id": "vector-versatiles-colorful-dark",
+      "file": "vector-versatiles-colorful-dark.png",
+      "thumb": "thumbs/vector-versatiles-colorful-dark.png",
+      "title": "Vector: VersaTiles Colorful Dark (dark)",
+      "category": "vector",
+      "theme": "dark",
+      "provider": "versatiles-colorful-dark",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 0,
+        "loaded": 0,
+        "failed": 0,
+        "pending": 0,
+        "requests": 25,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "style:tiles.versatiles.org": 1,
+          "host:tiles.versatiles.org": 24
+        },
+        "waitMs": 1523
+      },
+      "vectorPath": "maplibre-gl",
+      "resolvedProvider": "versatiles-colorful-dark"
+    },
+    {
+      "id": "overlay-hillshade-s2-light",
+      "file": "overlay-hillshade-s2-light.png",
+      "thumb": "thumbs/overlay-hillshade-s2-light.png",
+      "title": "Overlay: hillshade over Sentinel-2 (light)",
+      "category": "overlay",
+      "theme": "light",
+      "provider": "eox-s2-2025",
+      "overlays": [
+        "hillshade"
+      ],
+      "route": "#/map",
+      "view": {
+        "name": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 48,
+        "loaded": 48,
+        "failed": 0,
+        "pending": 0,
+        "requests": 48,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "eox": 24,
+          "terrarium": 24
+        },
+        "waitMs": 6293
+      },
+      "vectorPath": null,
+      "resolvedProvider": "eox-s2-2025"
+    },
+    {
+      "id": "overlay-hillshade-carto-light",
+      "file": "overlay-hillshade-carto-light.png",
+      "thumb": "thumbs/overlay-hillshade-carto-light.png",
+      "title": "Overlay: hillshade over Carto (light)",
+      "category": "overlay",
+      "theme": "light",
+      "provider": "carto-light",
+      "overlays": [
+        "hillshade"
+      ],
+      "route": "#/map",
+      "view": {
+        "name": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 48,
+        "loaded": 48,
+        "failed": 0,
+        "pending": 0,
+        "requests": 48,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "carto-light": 24,
+          "terrarium": 24
+        },
+        "waitMs": 2802
+      },
+      "vectorPath": null,
+      "resolvedProvider": "carto-light"
+    },
+    {
+      "id": "overlay-hillshade-s2-dark",
+      "file": "overlay-hillshade-s2-dark.png",
+      "thumb": "thumbs/overlay-hillshade-s2-dark.png",
+      "title": "Overlay: hillshade over Sentinel-2 (dark)",
+      "category": "overlay",
+      "theme": "dark",
+      "provider": "eox-s2-2025",
+      "overlays": [
+        "hillshade"
+      ],
+      "route": "#/map",
+      "view": {
+        "name": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 48,
+        "loaded": 48,
+        "failed": 0,
+        "pending": 0,
+        "requests": 48,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "eox": 24,
+          "terrarium": 24
+        },
+        "waitMs": 5527
+      },
+      "vectorPath": null,
+      "resolvedProvider": "eox-s2-2025"
+    },
+    {
+      "id": "overlay-hillshade-carto-dark",
+      "file": "overlay-hillshade-carto-dark.png",
+      "thumb": "thumbs/overlay-hillshade-carto-dark.png",
+      "title": "Overlay: hillshade over Carto (dark)",
+      "category": "overlay",
+      "theme": "dark",
+      "provider": "carto-dark",
+      "overlays": [
+        "hillshade"
+      ],
+      "route": "#/map",
+      "view": {
+        "name": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 48,
+        "loaded": 48,
+        "failed": 0,
+        "pending": 0,
+        "requests": 48,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "carto-dark": 24,
+          "terrarium": 24
+        },
+        "waitMs": 2793
+      },
+      "vectorPath": null,
+      "resolvedProvider": "carto-dark"
+    },
+    {
+      "id": "planner-s2-hillshade-light",
+      "file": "planner-s2-hillshade-light.png",
+      "thumb": "thumbs/planner-s2-hillshade-light.png",
+      "title": "Planner: Sentinel-2 + hillshade (light)",
+      "category": "planner",
+      "theme": "light",
+      "provider": "eox-s2-2025",
+      "overlays": [
+        "hillshade"
+      ],
+      "route": "#/tools/planner",
+      "view": {
+        "name": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 32,
+        "loaded": 32,
+        "failed": 0,
+        "pending": 0,
+        "requests": 32,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "eox": 16,
+          "terrarium": 16
+        },
+        "waitMs": 4027
+      },
+      "vectorPath": null,
+      "resolvedProvider": "eox-s2-2025"
+    },
+    {
+      "id": "planner-s2-hillshade-dark",
+      "file": "planner-s2-hillshade-dark.png",
+      "thumb": "thumbs/planner-s2-hillshade-dark.png",
+      "title": "Planner: Sentinel-2 + hillshade (dark)",
+      "category": "planner",
+      "theme": "dark",
+      "provider": "eox-s2-2025",
+      "overlays": [
+        "hillshade"
+      ],
+      "route": "#/tools/planner",
+      "view": {
+        "name": "Denver / Front Range",
+        "lat": 39.705,
+        "lon": -104.6916,
+        "zoom": 10
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 32,
+        "loaded": 32,
+        "failed": 0,
+        "pending": 0,
+        "requests": 32,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "eox": 16,
+          "terrarium": 16
+        },
+        "waitMs": 4531
+      },
+      "vectorPath": null,
+      "resolvedProvider": "eox-s2-2025"
+    },
+    {
+      "id": "picker-light",
+      "file": "picker-light.png",
+      "thumb": "thumbs/picker-light.png",
+      "title": "Layer picker open (light)",
+      "category": "picker",
+      "theme": "light",
+      "provider": "auto",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 30,
+        "loaded": 30,
+        "failed": 0,
+        "pending": 0,
+        "requests": 30,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "carto-light": 30
+        },
+        "waitMs": 1511
+      },
+      "vectorPath": null,
+      "resolvedProvider": "carto-light"
+    },
+    {
+      "id": "picker-dark",
+      "file": "picker-dark.png",
+      "thumb": "thumbs/picker-dark.png",
+      "title": "Layer picker open (dark)",
+      "category": "picker",
+      "theme": "dark",
+      "provider": "auto",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 30,
+        "loaded": 30,
+        "failed": 0,
+        "pending": 0,
+        "requests": 30,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {
+          "carto-dark": 30
+        },
+        "waitMs": 2307
+      },
+      "vectorPath": null,
+      "resolvedProvider": "carto-dark"
+    },
+    {
+      "id": "custom-map",
+      "file": "custom-map.png",
+      "thumb": "thumbs/custom-map.png",
+      "title": "Custom raster provider on the map",
+      "category": "custom",
+      "theme": "light",
+      "provider": "custom-gallery",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 24,
+        "loaded": 24,
+        "failed": 0,
+        "pending": 0,
+        "requests": 0,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {},
+        "waitMs": 1788
+      },
+      "vectorPath": null,
+      "resolvedProvider": "custom-gallery"
+    },
+    {
+      "id": "custom-picker",
+      "file": "custom-picker.png",
+      "thumb": "thumbs/custom-picker.png",
+      "title": "Custom raster provider in the picker",
+      "category": "custom",
+      "theme": "light",
+      "provider": "custom-gallery",
+      "overlays": [],
+      "route": "#/map",
+      "view": {
+        "name": "New York",
+        "lat": 40.6242,
+        "lon": -73.8354,
+        "zoom": 11
+      },
+      "status": "ok",
+      "failures": [],
+      "tiles": {
+        "visible": 30,
+        "loaded": 30,
+        "failed": 0,
+        "pending": 0,
+        "requests": 0,
+        "httpErrors": 0,
+        "requestFailures": 0,
+        "byHost": {},
+        "waitMs": 1765
+      },
+      "vectorPath": null,
+      "resolvedProvider": "custom-gallery"
+    }
+  ]
+}
