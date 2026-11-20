@@ -1709,16 +1709,22 @@ test('grid: MC_ductLinksAt keeps links heard within +-90 min, nearest reception 
   assert.deepStrictEqual(items.map(i => i.link.a.pubkey + ':' + i.kind), ['aa11:duct', 'cc33:plain', 'ee55:nodata'],
     'T+5400 s is in, T+5401 s is out');
   assert.deepStrictEqual(clone(ctx.MC_ductLinksAt(GLINKS.links, GT - 20000, 5400).map(i => i.kind)), ['plain'], 'the other reception of aa11');
-  const two = [{ t: GT + 100, ductFrac: 0.1 }, { t: GT - 50, ductFrac: 0.9 }, { t: GT + 50, ductFrac: 0.6 }];
+  const two = [{ t: GT + 100, meanGradNkm: -40, superFrac: 0.1 }, { t: GT - 50, meanGradNkm: -60, superFrac: 0.9 }, { t: GT + 50, meanGradNkm: -50, superFrac: 0.6 }];
   const link = { a: { lat: 1, lon: 1 }, b: { lat: 2, lon: 2 }, receptions: two };
   const r = ctx.MC_ductLinksAt([link], GT, 5400)[0];
   assert.deepStrictEqual(clone(r.recs.map(x => x.t)), [GT - 50, GT + 50, GT + 100], 'nearest first, earlier on a tie');
   assert.strictEqual(r.kind, 'duct', 'the colour follows the nearest reception');
-  assert.strictEqual(ctx.MC_ductLinkKind({ ductFrac: 0.5 }), 'duct');
-  assert.strictEqual(ctx.MC_ductLinkKind({ ductFrac: 0.4999 }), 'plain');
-  assert.strictEqual(ctx.MC_ductLinkKind({ ductFrac: 0 }), 'plain');
-  assert.strictEqual(ctx.MC_ductLinkKind({ ductFrac: -1 }), 'nodata');
+  // Emphasized: half or more of the path super-refractive or ducting; the LoRa-duct share does not decide it.
+  assert.strictEqual(ctx.MC_ductLinkKind({ meanGradNkm: -50, superFrac: 0.5 }), 'duct');
+  assert.strictEqual(ctx.MC_ductLinkKind({ meanGradNkm: -50, superFrac: 0.4999, ductFrac: 1 }), 'plain', 'a LoRa duct alone is not enough');
+  assert.strictEqual(ctx.MC_ductLinkKind({ meanGradNkm: -70, superFrac: 0.9, ductFrac: 0 }), 'duct', 'no LoRa duct needed');
+  assert.strictEqual(ctx.MC_ductLinkKind({ meanGradNkm: -30, superFrac: 0 }), 'plain');
+  assert.strictEqual(ctx.MC_ductLinkKind({ meanGradNkm: -30 }), 'plain', 'gradient without a share: plain');
+  assert.strictEqual(ctx.MC_ductLinkKind({ meanGradNkm: null, superFrac: 0.9 }), 'nodata', 'no path gradient: dashed');
+  assert.strictEqual(ctx.MC_ductLinkKind({ superFrac: 0.9, ductFrac: 0.9 }), 'nodata', 'gradient missing (older server): dashed');
+  assert.strictEqual(ctx.MC_ductLinkKind({ meanGradNkm: 'x', superFrac: 0.9 }), 'nodata');
   assert.strictEqual(ctx.MC_ductLinkKind({}), 'nodata');
+  assert.strictEqual(ctx.MC_ductLinkKind(null), 'nodata');
   const bad = [{ a: { lat: 'x', lon: 0 }, b: { lat: 1, lon: 1 }, receptions: [{ t: GT, ductFrac: 1 }] }, null, { a: {}, b: {} }];
   assert.strictEqual(ctx.MC_ductLinksAt(bad, GT, 5400).length, 0, 'links without positions are skipped');
 });
@@ -1732,37 +1738,59 @@ test('grid: MC_ductSegDist is the distance to the segment, clamped at its ends',
   assert.strictEqual(d({ x: 3, y: 4 }, { x: 0, y: 0 }, { x: 0, y: 0 }), 5, 'zero-length segment');
 });
 
-test('grid: MC_ductLinksSummary says only what the numbers say', () => {
+const FULL = { links: 56, receptions: 1234, withGrid: 1200, duringDuct: 0, baselineDuctFrac: 0.01, unverifiedPairs: 0,
+  recvMeanGradNkm: -58.4, baselineMeanGradNkm: -49.2, recvEnhancedFrac: 0.41, baselineEnhancedFrac: 0.22 };
+const LEAD = 'Last 7 days: 1,234 receptions on 56 node pairs without terrain line of sight.';
+const GRAD = 'Along their paths the modelled refractivity gradient averaged −58 N/km when heard, against −49 N/km for the same paths over the whole period';
+const ENH = 'half or more of the path was super-refractive or ducting for 41% of receptions vs 22% overall';
+
+test('grid: MC_ductLinksSummary leads with the gradient comparison; says only what the numbers say', () => {
   const { ctx } = makeGridSandbox();
-  const f = ctx.MC_ductLinksSummary;
-  assert.strictEqual(f({ links: 9, receptions: 42, withGrid: 42, duringDuct: 30, baselineDuctFrac: 0.23 }, 7),
-    'Last 7 days: 42 direct receptions beyond the radio horizon on 9 node pairs. 71% were during a modelled duct along the path; the same paths were ducted 23% of the time overall.');
-  assert.strictEqual(f(GLINKS.summary, 7),
-    'Last 7 days: 6 direct receptions beyond the radio horizon on 4 node pairs. Of the 5 with model data, 40% were during a modelled duct along the path; the same paths were ducted 23% of the time overall.');
-  assert.strictEqual(f({ links: 9, receptions: 42, withGrid: 42, duringDuct: 30, baselineDuctFrac: -1 }, 7),
-    'Last 7 days: 42 direct receptions beyond the radio horizon on 9 node pairs. 71% were during a modelled duct along the path.', 'no baseline: no comparison');
-  assert.strictEqual(f({ links: 9, receptions: 42, withGrid: 0, duringDuct: 0, baselineDuctFrac: 0.2 }, 7),
-    'Last 7 days: 42 direct receptions beyond the radio horizon on 9 node pairs.', 'no model data: no share, no comparison');
-  assert.strictEqual(f({ links: 1, receptions: 1, withGrid: 0, duringDuct: 0, baselineDuctFrac: -1 }, 1),
-    'Last 24 hours: 1 direct reception beyond the radio horizon on 1 node pair.');
-  assert.strictEqual(f({ links: 0, receptions: 0, withGrid: 0, duringDuct: 0, baselineDuctFrac: -1 }, 3),
-    'Last 3 days: no direct receptions beyond the radio horizon.');
+  const f = (sum, days, m) => ctx.MC_ductLinksSummary(Object.assign({}, FULL, sum), days == null ? 7 : days, m == null ? 'terrain' : m);
+  assert.strictEqual(f({}), LEAD + ' ' + GRAD + '; ' + ENH + '.', 'no LoRa duct: no LoRa sentence');
+  assert.strictEqual(f({}, 7, 'smooth-earth'), LEAD.replace('without terrain line of sight', 'beyond the radio horizon') + ' ' + GRAD + '; ' + ENH + '.');
+  assert.strictEqual(f({}, 7, ''), f({}, 7, 'smooth-earth'), 'unknown method: the smooth-earth wording');
+  assert.strictEqual(f({ duringDuct: 3, unverifiedPairs: 12 }),
+    LEAD + ' ' + GRAD + '; ' + ENH + '. Half or more of the path was in a modelled duct that may carry LoRa for 3 receptions. 12 more pairs not checked yet.');
+  assert.strictEqual(f({ duringDuct: 1, unverifiedPairs: 1 }).slice(-96),
+    'Half or more of the path was in a modelled duct that may carry LoRa for 1 reception. 1 more pair not checked yet.'.slice(-96));
+  // Null values drop their comparison, never invent one.
+  assert.strictEqual(f({ baselineMeanGradNkm: null }),
+    LEAD + ' Along their paths the modelled refractivity gradient averaged −58 N/km when heard; ' + ENH + '.');
+  assert.strictEqual(f({ baselineEnhancedFrac: null }), LEAD + ' ' + GRAD + '; half or more of the path was super-refractive or ducting for 41% of receptions.');
+  assert.strictEqual(f({ recvMeanGradNkm: null, baselineMeanGradNkm: null }),
+    LEAD + ' Half or more of the path was super-refractive or ducting for 41% of receptions vs 22% overall.');
+  assert.strictEqual(f({ recvEnhancedFrac: null }), LEAD + ' ' + GRAD + '.');
+  assert.strictEqual(f({ recvMeanGradNkm: null, recvEnhancedFrac: null, baselineEnhancedFrac: -1 }), LEAD, 'nothing to compare');
+  assert.strictEqual(f({ recvMeanGradNkm: undefined, recvEnhancedFrac: undefined }), LEAD, 'fields missing (older server)');
+  assert.strictEqual(f({ links: 1, receptions: 1 }, 1).slice(0, 72), 'Last 24 hours: 1 reception on 1 node pair without terrain line of sight.');
+  assert.strictEqual(f({ links: 0, receptions: 0, unverifiedPairs: 2 }, 3),
+    'Last 3 days: no receptions between node pairs without terrain line of sight. 2 more pairs not checked yet.');
+  assert.strictEqual(f({ recvMeanGradNkm: 12.4, baselineMeanGradNkm: 0 }).indexOf('averaged 12 N/km when heard, against 0 N/km') > 0, true, 'positive and zero plain');
+  assert.strictEqual(ctx.MC_ductLinksSummary(GLINKS.summary, 7, 'terrain'), ctxSummary() + ' ' +
+    GRAD + '; ' + ENH + '. Half or more of the path was in a modelled duct that may carry LoRa for 2 receptions. 3 more pairs not checked yet.');
 });
 
 test('grid: link popup shows node names as text only (a hostile name stays inert), heights, receptions', () => {
   const { ctx } = makeGridSandbox();
   const item = ctx.MC_ductLinksAt(GLINKS.links, GT, 5400)[0];
-  const box = ctx.MC_ductLinkPopup(item, 869.525);
+  const box = ctx.MC_ductLinkPopup(item, 869.525, 'terrain');
   const text = box.textContent;
   assert.ok(text.indexOf('Sent by: Hill Top') >= 0);
   assert.ok(text.indexOf('Heard by: <img src=x onerror=alert(1)>') >= 0, 'the name is shown literally');
   assert.strictEqual(find(box, n => /^img$/i.test(n.tagName || '')).length, 0, 'no element made from the name');
   assert.ok(!('innerHTML' in box) || box.innerHTML === undefined);
-  assert.ok(text.indexOf('190 km apart; radio horizon 59 km') >= 0);
+  assert.ok(text.indexOf('190 km apart; no terrain line of sight (smooth-earth radio horizon 59 km)') >= 0, text);
+  assert.ok(ctx.MC_ductLinkPopup(item, 869.525, 'smooth-earth').textContent.indexOf('190 km apart; radio horizon 59 km') >= 0);
   assert.ok(text.indexOf('Antenna heights: sender 12 m, receiver 10 m (site default)') >= 0);
-  assert.ok(/ · heard directly by the observer · SNR −5\.5 dB · RSSI −118 dBm · modelled duct along 80% of the path, super-refraction along 100%/.test(text), text);
+  assert.ok(/ · heard directly by the observer · SNR −5\.5 dB · RSSI −118 dBm · path gradient −62 N\/km · super-refractive or ducting along 80% of the path · LoRa duct along 80%$/m.test(text), text);
   assert.ok(text.indexOf('Heard 3 times in the period') >= 0);
-  assert.ok(text.indexOf('a duct that can carry 869.525 MHz') >= 0);
+  assert.ok(text.indexOf('LoRa duct: a modelled duct that may carry 869.525 MHz.') >= 0, 'explained when a LoRa share is shown');
+  // No LoRa-duct share: not listed, not explained.
+  const late = ctx.MC_ductLinksAt(GLINKS.links, GT + 5401, 0)[0];
+  const lt = ctx.MC_ductLinkPopup(late, 869.525, 'terrain').textContent;
+  assert.ok(lt.indexOf('path gradient \u221270 N/km \u00b7 super-refractive or ducting along 90% of the path') >= 0, lt);
+  assert.ok(lt.indexOf('LoRa duct') < 0, lt);
   // No model data, no name (key prefix), a very long name capped.
   const nodata = ctx.MC_ductLinksAt(GLINKS.links, GT + 5400, 0)[0];
   assert.ok(ctx.MC_ductLinkPopup(nodata, 869.525).textContent.indexOf('no model data for this time') >= 0);
@@ -1779,7 +1807,7 @@ test('grid: link popup says how each reception was heard; a relay reception show
   const relay = ctx.MC_ductLinksAt(GLINKS.links, GT - 20000, 0)[0];
   const lines = find(ctx.MC_ductLinkPopup(relay, 869.525), n => n.tagName === 'li').map(n => n.textContent);
   assert.strictEqual(lines.length, 1);
-  assert.ok(/ · relayed: the second repeater heard the first directly · modelled duct along 10% of the path/.test(lines[0]), lines[0]);
+  assert.ok(/ · relayed: the second repeater heard the first directly · path gradient −46 N\/km · super-refractive or ducting along 20% of the path · LoRa duct along 10%$/.test(lines[0]), lines[0]);
   assert.ok(lines[0].indexOf('SNR') < 0 && lines[0].indexOf('RSSI') < 0, 'absent values are left out');
   const cc = ctx.MC_ductLinksAt(GLINKS.links, GT - 1800, 0)[0];
   assert.strictEqual(cc.link.a.pubkey, 'cc33');
@@ -1847,7 +1875,7 @@ test('grid: legend has no edge row, says what past times are, and the long-link 
   assert.ok(t.indexOf('Positions are self-reported; a long link can also come from a wrong position.') >= 0);
   assert.ok(t.indexOf('Weather data: NOAA GFS (public domain)') >= 0, 'attribution from meta');
 });
-function ctxSummary() { return 'Last 7 days: 6 direct receptions beyond the radio horizon on 4 node pairs.'; }
+function ctxSummary() { return 'Last 7 days: 6 receptions on 4 node pairs without terrain line of sight.'; }
 
 test('grid: panning inside the drawn window fetches nothing; leaving it fetches the new box', async () => {
   const s = await mountGrid();
@@ -2165,7 +2193,7 @@ test('grid legend: the long-link line key folds behind a button (aria-expanded);
   assert.strictEqual(tog.type, 'button');
   assert.strictEqual(tog.textContent, 'Observed long links');
   assert.strictEqual(tog.attrs['aria-expanded'], 'true', 'open by default on a tall screen');
-  assert.ok(legendText(s).indexOf('Heard during a modelled duct along at least half the path') >= 0);
+  assert.ok(legendText(s).indexOf('Half or more of the path super-refractive or ducting (model)') >= 0);
   FOCUSED.length = 0;
   tog.fire('click');
   tog = linksToggle(s);
@@ -2174,14 +2202,14 @@ test('grid legend: the long-link line key folds behind a button (aria-expanded);
   const t = legendText(s);
   assert.ok(t.indexOf(ctxSummary()) >= 0, 'the summary stays');
   assert.ok(t.indexOf('Positions are self-reported; a long link can also come from a wrong position.') >= 0, 'the caveat stays');
-  assert.ok(t.indexOf('Heard during a modelled duct') < 0 && t.indexOf('Dashed: no model data') < 0, 'line key folded away');
+  assert.ok(t.indexOf('Half or more of the path super-refractive') < 0 && t.indexOf('Dashed: no model data') < 0, 'line key folded away');
   assert.ok(t.indexOf('On the map: 3 links heard within 90 min') >= 0, 'the count at the shown time stays');
   slide(s, 6);
   assert.ok(legendText(s).indexOf('On the map: 1 link heard within 90 min') >= 0, 'and follows the slider while folded');
   assert.strictEqual(linkLines(s).length > 0, true, 'lines on the map are unaffected');
   linksToggle(s).fire('click');
   assert.strictEqual(linksToggle(s).attrs['aria-expanded'], 'true');
-  assert.ok(legendText(s).indexOf('Heard during a modelled duct along at least half the path') >= 0, 'line key back');
+  assert.ok(legendText(s).indexOf('Half or more of the path super-refractive or ducting (model)') >= 0, 'line key back');
   // The state survives a legend rebuild (links refresh) and a fold of the whole legend.
   linksToggle(s).fire('click');
   s.layer._renderLegend();

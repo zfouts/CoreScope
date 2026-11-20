@@ -8,7 +8,12 @@
   "receptions": 6,
   "withGrid": 5,
   "duringDuct": 2,
-  "baselineDuctFrac": 0.23
+  "baselineDuctFrac": 0.23,
+  "unverifiedPairs": 3,
+  "recvMeanGradNkm": -58.4,
+  "baselineMeanGradNkm": -49.2,
+  "recvEnhancedFrac": 0.41,
+  "baselineEnhancedFrac": 0.22
  },
  "links": [
   {
@@ -37,14 +42,16 @@
      "snr": -5.5,
      "rssi": -118,
      "ductFrac": 0.8,
-     "superFrac": 1,
-     "via": "observer"
+     "superFrac": 0.8,
+     "via": "observer",
+     "meanGradNkm": -62.3
     },
     {
      "t": 1795026400,
      "via": "relay",
      "ductFrac": 0.1,
-     "superFrac": 0.4
+     "superFrac": 0.2,
+     "meanGradNkm": -45.6
     }
    ]
   },
@@ -72,8 +79,9 @@
     {
      "t": 1795044600,
      "via": "relay",
-     "ductFrac": 0.2,
-     "superFrac": 0
+     "ductFrac": 0,
+     "superFrac": 0.3,
+     "meanGradNkm": -47
     }
    ]
   },
@@ -103,7 +111,8 @@
      "rssi": -125,
      "ductFrac": -1,
      "superFrac": -1,
-     "via": "observer"
+     "via": "observer",
+     "meanGradNkm": null
     }
    ]
   },
@@ -130,11 +139,13 @@
    "receptions": [
     {
      "t": 1795051801,
-     "ductFrac": 0.9,
-     "superFrac": 1,
-     "via": "observer"
+     "ductFrac": 0,
+     "superFrac": 0.9,
+     "via": "observer",
+     "meanGradNkm": -70
     }
    ]
   }
- ]
+ ],
+ "losMethod": "terrain"
 }

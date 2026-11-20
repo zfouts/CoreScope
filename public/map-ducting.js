@@ -99,11 +99,13 @@
  *     added and used when it is a stored time. map.js turns the overlay on
  *     for duct=1.
  *   - GET /api/ducting/links?days=<historyDays> (on add and with each meta
- *     refresh): direct receptions beyond the radio horizon. The ones within
- *     +-90 min of the shown time are drawn as non-interactive lines on the
- *     line canvas (--mc-duct-link-duct when that reception's path was at
- *     least half ducted in the model, else --mc-duct-link; dashed without
- *     model data; the solid ones over a --mc-duct-link-casing halo). The
+ *     refresh): node pairs heard directly without terrain line of sight
+ *     (losMethod "terrain"; else beyond the smooth-earth radio horizon).
+ *     The ones within +-90 min of the shown time are drawn as
+ *     non-interactive lines on the line canvas (--mc-duct-link-duct when
+ *     half or more of that reception's path was super-refractive or
+ *     ducting in the model, else --mc-duct-link; dashed without a modelled
+ *     path gradient; the solid ones over a --mc-duct-link-casing halo). The
  *     map click handler opens a link popup for a click
  *     within 6 px of one before it looks up a cell. Names are node-chosen
  *     text: textContent only.
@@ -115,8 +117,8 @@
  *   window.MC_ductLinksAt(links, t, winS) -> [{ link, recs, kind }]
  *   window.MC_ductLinkKind(reception)   -> 'duct' | 'plain' | 'nodata'
  *   window.MC_ductSegDist(p, a, b)      -> px from point p to segment ab
- *   window.MC_ductLinksSummary(summary, days) -> legend sentence(s)
- *   window.MC_ductLinkPopup(item, freqMHz) -> popup DOM (textContent only)
+ *   window.MC_ductLinksSummary(summary, days, losMethod) -> legend sentence(s)
+ *   window.MC_ductLinkPopup(item, freqMHz, losMethod) -> popup DOM (textContent only)
  */
 (function () {
   'use strict';
@@ -194,7 +196,7 @@
   var GRID_MAX_CELLS = 4000;            // the server's cap per window
   var STEP_LADDER = [1, 2, 4, 8, 16];   // x the native step (0.5 -> 0.5..8 deg)
   var LINK_WINDOW_S = 90 * 60;          // receptions drawn within +-90 min
-  var LINK_DUCT_FRAC = 0.5;             // "during a duct": half the path or more
+  var LINK_ENHANCED_FRAC = 0.5;         // emphasized: half the path or more super-refractive or ducting
   var LINK_HIT_PX = 6;
   var LINK_MAX_RECS = 5;                // receptions listed in a link popup
   var NAME_MAX = 64;
@@ -820,12 +822,17 @@
     return U.updateHashParams(updates, hash);
   }
 
-  // 'duct' when a reception's path was at least half ducted in the model,
-  // 'plain' when less, 'nodata' without a stored step (-1) or a value.
+  function num(v) { return (v != null && v !== '' && isFinite(Number(v))) ? Number(v) : null; }
+
+  // The line kind of a reception: 'duct' (the emphasized colour) when half
+  // or more of the path was super-refractive or ducting in the model,
+  // 'plain' when less, 'nodata' without a modelled path gradient (no stored
+  // step). The yes/no "duct can carry LoRa" test is almost never true at
+  // GFS resolution, so it does not decide the colour.
   function linkKind(r) {
-    var f = r && r.ductFrac != null ? Number(r.ductFrac) : NaN;
-    if (!(f >= 0)) return 'nodata';
-    return f >= LINK_DUCT_FRAC ? 'duct' : 'plain';
+    if (!r || num(r.meanGradNkm) == null) return 'nodata';
+    var f = num(r.superFrac);
+    return (f != null && f >= LINK_ENHANCED_FRAC) ? 'duct' : 'plain';
   }
 
   function endOk(e) {
@@ -878,21 +885,50 @@
 
   function int0(v) { v = Math.round(Number(v)); return isFinite(v) && v > 0 ? v : 0; }
 
-  // The legend's period summary: only what the numbers say. The duct share
-  // is left out without receptions that have model data; the comparison
-  // with the same paths overall without a baseline (-1).
-  function linksSummary(sum, days) {
+  // 1234 -> '1,234'.
+  function fmtInt(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+
+  function pctOf(f) { return Math.round(f * 100) + '%'; }
+
+  // A share 0..1, else null (missing, null or -1 = no data).
+  function frac(v) { v = num(v); return (v != null && v >= 0 && v <= 1) ? v : null; }
+
+  // '-58 N/km' with a real minus sign.
+  function fmtGrad(v) { return fmtSigned(Math.round(v)) + ' N/km'; }
+
+  // What makes a pair count: no terrain line of sight (losMethod
+  // "terrain"), else beyond the smooth-earth radio horizon.
+  function losPhrase(method) { return method === 'terrain' ? 'without terrain line of sight' : 'beyond the radio horizon'; }
+
+  // The legend's period summary: only what the numbers say, leading with
+  // the modelled path gradient when heard against the same paths over the
+  // whole period, then the share of receptions with half or more of the
+  // path super-refractive or ducting (each comparison only when both
+  // values exist), the LoRa-duct count only when there is one, and the
+  // pairs whose line of sight is not checked yet.
+  function linksSummary(sum, days, method) {
     if (!sum) return '';
     days = int0(days);
     var period = days === 1 ? 'Last 24 hours' : days ? 'Last ' + days + ' days' : 'Recently';
-    var rec = int0(sum.receptions), pairs = int0(sum.links), wg = int0(sum.withGrid), dd = int0(sum.duringDuct);
-    var base = Number(sum.baselineDuctFrac);
-    if (!rec) return period + ': no direct receptions beyond the radio horizon.';
-    var s = period + ': ' + plural(rec, 'direct reception') + ' beyond the radio horizon on ' + plural(pairs, 'node pair') + '.';
-    if (!wg) return s;
-    var share = Math.round(Math.min(dd, wg) / wg * 100) + '%';
-    s += ' ' + (wg < rec ? 'Of the ' + wg + ' with model data, ' + share : share) + ' were during a modelled duct along the path';
-    return s + (base >= 0 && base <= 1 ? '; the same paths were ducted ' + Math.round(base * 100) + '% of the time overall.' : '.');
+    var rec = int0(sum.receptions), pairs = int0(sum.links), dd = int0(sum.duringDuct), unv = int0(sum.unverifiedPairs);
+    var out = [];
+    if (!rec) out.push(period + ': no receptions between node pairs ' + losPhrase(method) + '.');
+    else {
+      out.push(period + ': ' + fmtInt(rec) + ' reception' + (rec === 1 ? '' : 's') + ' on ' + fmtInt(pairs) + ' node pair' +
+        (pairs === 1 ? '' : 's') + ' ' + losPhrase(method) + '.');
+      var g = num(sum.recvMeanGradNkm), gb = num(sum.baselineMeanGradNkm);
+      var e = frac(sum.recvEnhancedFrac), eb = frac(sum.baselineEnhancedFrac);
+      var grad = g == null ? '' : 'Along their paths the modelled refractivity gradient averaged ' + fmtGrad(g) + ' when heard' +
+        (gb == null ? '' : ', against ' + fmtGrad(gb) + ' for the same paths over the whole period');
+      var enh = e == null ? '' : 'half or more of the path was super-refractive or ducting for ' + pctOf(e) + ' of receptions' +
+        (eb == null ? '' : ' vs ' + pctOf(eb) + ' overall');
+      if (grad && enh) out.push(grad + '; ' + enh + '.');
+      else if (grad) out.push(grad + '.');
+      else if (enh) out.push(enh.charAt(0).toUpperCase() + enh.slice(1) + '.');
+      if (dd) out.push('Half or more of the path was in a modelled duct that may carry LoRa for ' + fmtInt(dd) + ' reception' + (dd === 1 ? '' : 's') + '.');
+    }
+    if (unv) out.push(fmtInt(unv) + ' more pair' + (unv === 1 ? '' : 's') + ' not checked yet.');
+    return out.join(' ');
   }
 
   // A node's name for display (plain text, capped), else its key prefix.
@@ -919,40 +955,47 @@
   var VIA_TEXT = { observer: 'heard directly by the observer', relay: 'relayed: the second repeater heard the first directly' };
 
   // One reception: time, how it was heard, SNR/RSSI when present (a relay
-  // reception has none), the modelled duct share.
+  // reception has none), the modelled path gradient and the share of the
+  // path that was super-refractive or ducting; the LoRa-duct share only
+  // when there is one.
   function recLine(r) {
     var parts = [fmtTime(Number(r.t))];
     if (typeof r.via === 'string' && Object.prototype.hasOwnProperty.call(VIA_TEXT, r.via)) parts.push(VIA_TEXT[r.via]);
     if (r.snr != null && isFinite(Number(r.snr))) parts.push('SNR ' + fmtNum(r.snr, 1) + ' dB');
     if (r.rssi != null && isFinite(Number(r.rssi))) parts.push('RSSI ' + fmtNum(r.rssi, 0) + ' dBm');
-    var f = Number(r.ductFrac);
-    if (r.ductFrac != null && f >= 0) {
-      var t = 'modelled duct along ' + Math.round(f * 100) + '% of the path';
-      var sf = Number(r.superFrac);
-      if (r.superFrac != null && sf > 0) t += ', super-refraction along ' + Math.round(sf * 100) + '%';
-      parts.push(t);
-    } else parts.push('no model data for this time');
-    return parts.join(' · ');
+    var g = num(r.meanGradNkm), sf = frac(r.superFrac), df = frac(r.ductFrac);
+    if (g == null && sf == null) {
+      parts.push('no model data for this time');
+      return parts.join(' \u00b7 ');
+    }
+    if (g != null) parts.push('path gradient ' + fmtGrad(g));
+    if (sf != null) parts.push('super-refractive or ducting along ' + pctOf(sf) + ' of the path');
+    if (df != null && df > 0) parts.push('LoRa duct along ' + pctOf(df));
+    return parts.join(' \u00b7 ');
   }
 
   // Popup body of a drawn link (DOM, textContent only: names are chosen by
-  // whoever runs the node).
-  function linkPopupContent(item, freqMHz) {
+  // whoever runs the node). method: the answer's losMethod.
+  function linkPopupContent(item, freqMHz, method) {
     var L0 = item.link, box = el('div', 'mc-duct-popup mc-duct-link-popup');
     box.appendChild(el('div', 'mc-duct-popup-title', 'Long link, heard directly'));
     box.appendChild(el('div', 'mc-duct-link-end', 'Sent by: ' + nodeName(L0.a)));
     box.appendChild(el('div', 'mc-duct-link-end', 'Heard by: ' + nodeName(L0.b)));
-    box.appendChild(el('div', null, fmtKm(L0.distKm) + ' apart; radio horizon ' + fmtKm(L0.horizonKm)));
+    box.appendChild(el('div', null, fmtKm(L0.distKm) + ' apart; ' +
+      (method === 'terrain' ? 'no terrain line of sight (smooth-earth radio horizon ' + fmtKm(L0.horizonKm) + ')' : 'radio horizon ' + fmtKm(L0.horizonKm))));
     box.appendChild(el('div', null, 'Antenna heights: sender ' + fmtHeight(L0.a) + ', receiver ' + fmtHeight(L0.b)));
     box.appendChild(el('div', 'mc-duct-popup-sub', 'Heard near the selected time:'));
-    var list = el('ul', 'mc-duct-link-recs');
-    for (var i = 0; i < item.recs.length && i < LINK_MAX_RECS; i++) list.appendChild(el('li', null, recLine(item.recs[i])));
+    var list = el('ul', 'mc-duct-link-recs'), lora = false;
+    for (var i = 0; i < item.recs.length && i < LINK_MAX_RECS; i++) {
+      list.appendChild(el('li', null, recLine(item.recs[i])));
+      if ((frac(item.recs[i].ductFrac) || 0) > 0) lora = true;
+    }
     box.appendChild(list);
     var count = int0(L0.count);
     if (count) box.appendChild(el('div', 'mc-duct-popup-note', 'Heard ' + plural(count, 'time') + ' in the period'));
     var f = Number(freqMHz);
-    box.appendChild(el('div', 'mc-duct-popup-note', 'Duct share: path points where the model shows a duct that can carry ' +
-      (f > 0 ? fmtMHz(f) : 'LoRa') + '.'));
+    box.appendChild(el('div', 'mc-duct-popup-note', 'Path gradient: the model\u2019s mean refractivity gradient along the line (more negative bends more). Shares are of the points along the line.' +
+      (lora ? ' LoRa duct: a modelled duct that may carry ' + (f > 0 ? fmtMHz(f) : 'LoRa') + '.' : '')));
     return box;
   }
 
@@ -1405,8 +1448,8 @@
         this._linksToggle = tog;
         sec.appendChild(tog);
         var rows = this._linksOpen ? [
-          ['mc-duct-swatch-link-duct', 'Heard during a modelled duct along at least half the path'],
-          ['mc-duct-swatch-link', 'Heard with less or no modelled duct'],
+          ['mc-duct-swatch-link-duct', 'Half or more of the path super-refractive or ducting (model)'],
+          ['mc-duct-swatch-link', 'Less of the path super-refractive or ducting'],
           ['mc-duct-swatch-link-nodata', 'Dashed: no model data for that time']
         ] : [];
         for (var i = 0; i < rows.length; i++) {
@@ -1415,7 +1458,7 @@
           r.appendChild(el('span', null, rows[i][1]));
           sec.appendChild(r);
         }
-        sec.appendChild(el('div', 'mc-duct-links-summary', linksSummary(ld.summary, ld.days)));
+        sec.appendChild(el('div', 'mc-duct-links-summary', linksSummary(ld.summary, ld.days, ld.losMethod)));
         this._linkCountEl = el('div', 'mc-duct-legend-meta');
         this._linkCountEl.setAttribute('aria-live', 'polite');
         this._updateLinkCount();
@@ -1962,7 +2005,7 @@
         try {
           if (!this._linkPopup) this._linkPopup = L.popup({ maxWidth: 300 });
           this._linkPopupId = linkId(items[best].link);
-          this._linkPopup.setLatLng(latlng).setContent(linkPopupContent(items[best], this._links && this._links.freqMHz)).openOn(map);
+          this._linkPopup.setLatLng(latlng).setContent(linkPopupContent(items[best], this._links && this._links.freqMHz, this._links && this._links.losMethod)).openOn(map);
           return true;
         } catch (_) { return false; }
       },
@@ -1976,7 +2019,7 @@
         var items = this._shownLinks || [];
         for (var k = 0; k < items.length; k++) {
           if (linkId(items[k].link) === this._linkPopupId) {
-            p.setContent(linkPopupContent(items[k], this._links && this._links.freqMHz));
+            p.setContent(linkPopupContent(items[k], this._links && this._links.freqMHz, this._links && this._links.losMethod));
             return;
           }
         }
