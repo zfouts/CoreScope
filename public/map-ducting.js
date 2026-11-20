@@ -119,6 +119,9 @@
  *   window.MC_ductSegDist(p, a, b)      -> px from point p to segment ab
  *   window.MC_ductLinksSummary(summary, days, losMethod) -> legend sentence(s)
  *   window.MC_ductLinkPopup(item, freqMHz, losMethod) -> popup DOM (textContent only)
+ *   window.MC_ductGradientTable(summary) -> legend table of the heard share
+ *       by path gradient (summary.byGradient[, byGradientIntermittent]), or null
+ *   window.MC_ductGradBinLabel(bin)      -> 'weaker than −40', '−62 or stronger (High)'
  */
 (function () {
   'use strict';
@@ -1014,6 +1017,76 @@
     return box;
   }
 
+  // ── Heard share by path gradient (legend table) ──
+
+  var GRAD_TITLE = 'How often the pairs were heard, by path gradient';
+  var GRAD_SENTENCE = 'If ducting matters, the share should rise towards the High band, most clearly for intermittent pairs.';
+
+  // A bin's label from its bounds (N/km; null = open end), weaker first:
+  // 'weaker than −40', '−40 to −50', '−62 or stronger (High)'.
+  function gradBinLabel(b) {
+    var f = num(b && b.fromNkm), t = num(b && b.toNkm);
+    if (f == null && t == null) return 'all';
+    if (f == null) return 'weaker than ' + fmtSigned(Math.round(t));
+    if (t == null) return fmtSigned(Math.round(f)) + ' or stronger' + (f <= STOP_N[4] ? ' (High)' : '');
+    return fmtSigned(Math.round(f)) + ' to ' + fmtSigned(Math.round(t));
+  }
+
+  // { pct: '41%' or '\u2014', n: 'n=1,234' or '' } for one bin.
+  function gradCell(b) {
+    var path = int0(b && b.pathSteps), heard = int0(b && b.heardSteps);
+    if (!path) return { pct: '\u2014', n: '' };
+    return { pct: Math.round(Math.min(heard, path) / path * 100) + '%', n: 'n=' + fmtInt(path) };
+  }
+
+  function gradBins(a) {
+    if (!Array.isArray(a)) return null;
+    for (var i = 0; i < a.length; i++) if (!a[i] || typeof a[i] !== 'object') return null;
+    return a.length ? a : null;
+  }
+
+  // The table (a <div> holding a semantic <table> and the one sentence), or
+  // null when the answer has no byGradient (an older server). The
+  // intermittent column only when its bins match the main ones.
+  function gradientTable(sum) {
+    var all = gradBins(sum && sum.byGradient);
+    if (!all) return null;
+    var inter = gradBins(sum.byGradientIntermittent);
+    if (inter && inter.length !== all.length) inter = null;
+    var wrap = el('div', 'mc-duct-grad');
+    var table = el('table', 'mc-duct-grad-table');
+    table.appendChild(el('caption', null, GRAD_TITLE));
+    var head = el('thead'), hr = el('tr');
+    var cols = ['Path gradient (N/km)', 'All pairs'];
+    if (inter) cols.push('Intermittent pairs (' + fmtInt(int0(sum.intermittentPairs)) + ')');
+    for (var c = 0; c < cols.length; c++) {
+      var th = el('th', null, cols[c]);
+      th.setAttribute('scope', 'col');
+      hr.appendChild(th);
+    }
+    head.appendChild(hr);
+    table.appendChild(head);
+    var body = el('tbody');
+    for (var i = 0; i < all.length; i++) {
+      var tr = el('tr'), rh = el('th', null, gradBinLabel(all[i]));
+      rh.setAttribute('scope', 'row');
+      tr.appendChild(rh);
+      var cells = inter ? [all[i], inter[i]] : [all[i]];
+      for (var k = 0; k < cells.length; k++) {
+        var v = gradCell(cells[k]), td = el('td', null, v.pct);
+        // Leading space: read as '41% n=1,234', not '41%n=1,234' (it is a block, so not shown).
+        if (v.n) td.appendChild(el('span', 'mc-duct-grad-n', ' ' + v.n));
+        tr.appendChild(td);
+      }
+      body.appendChild(tr);
+    }
+    table.appendChild(body);
+    wrap.appendChild(table);
+    wrap.appendChild(el('div', 'mc-duct-legend-meta', 'Share of 3-hour steps in which the pair was heard; n = pair-steps with model data.'));
+    wrap.appendChild(el('div', 'mc-duct-grad-note', GRAD_SENTENCE));
+    return wrap;
+  }
+
   function linkId(link) { return String(link.a && link.a.pubkey) + '>' + String(link.b && link.b.pubkey); }
 
   // ── Layer ─────────────────────────────────────────────────────────────────
@@ -1478,6 +1551,8 @@
         this._linkCountEl.setAttribute('aria-live', 'polite');
         this._updateLinkCount();
         sec.appendChild(this._linkCountEl);
+        var gt = this._linksOpen ? gradientTable(ld.summary) : null;
+        if (gt) sec.appendChild(gt);
         sec.appendChild(el('div', 'mc-duct-legend-note', MSG_POSITIONS));
         return sec;
       },
@@ -2169,4 +2244,6 @@
   window.MC_ductLinksMethod = linksMethod;
   window.MC_ductLinksSummary = linksSummary;
   window.MC_ductLinkPopup = linkPopupContent;
+  window.MC_ductGradientTable = gradientTable;
+  window.MC_ductGradBinLabel = gradBinLabel;
 })();

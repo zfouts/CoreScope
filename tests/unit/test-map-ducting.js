@@ -1843,6 +1843,62 @@ test('grid: link popup says how each reception was heard; a relay reception show
   assert.ok(li[3].indexOf('heard directly') < 0 && li[3].indexOf('relayed') < 0 && li[3].indexOf('no model data') > 0, li[3]);
 });
 
+const gradRows = (box) => find(box, n => n.tagName === 'tr').map(tr => tr.children.map(c => c.textContent.replace(/\n/g, ' ')));
+
+test('grid: MC_ductGradientTable: semantic table of the heard share by path gradient, all and intermittent pairs', () => {
+  const { ctx } = makeGridSandbox();
+  const box = ctx.MC_ductGradientTable(GLINKS.summary);
+  const table = find(box, n => n.tagName === 'table')[0];
+  assert.ok(table, 'a real <table>');
+  assert.strictEqual(find(table, n => n.tagName === 'caption')[0].textContent, 'How often the pairs were heard, by path gradient');
+  const ths = find(table, n => n.tagName === 'th');
+  assert.ok(ths.length === 3 + 4 && ths.every(th => th.attrs.scope === (ths.indexOf(th) < 3 ? 'col' : 'row')), 'column and row headers carry scope');
+  assert.deepStrictEqual(gradRows(box), [
+    ['Path gradient (N/km)', 'All pairs', 'Intermittent pairs (2)'],
+    ['weaker than −40', '8% n=1,200', '3% n=310'],
+    ['−40 to −50', '10% n=2,410', '7% n=402'],
+    ['−50 to −62', '15% n=830', '—'],
+    ['−62 or stronger (High)', '32% n=160', '34% n=44'],
+  ]);
+  const t = box.textContent;
+  assert.ok(t.indexOf('If ducting matters, the share should rise towards the High band, most clearly for intermittent pairs.') >= 0);
+  assert.strictEqual(find(box, n => n.tagName === 'td').filter(td => td.textContent === '—').length, 1, 'pathSteps 0: a dash, no n');
+});
+
+test('grid: MC_ductGradientTable guards: no byGradient -> null; no or mismatched intermittent bins -> one column; bad values', () => {
+  const { ctx } = makeGridSandbox();
+  assert.strictEqual(ctx.MC_ductGradientTable({}), null, 'older server');
+  assert.strictEqual(ctx.MC_ductGradientTable(null), null);
+  assert.strictEqual(ctx.MC_ductGradientTable({ byGradient: [] }), null);
+  assert.strictEqual(ctx.MC_ductGradientTable({ byGradient: 'x' }), null);
+  assert.strictEqual(ctx.MC_ductGradientTable({ byGradient: [null] }), null);
+  const only = ctx.MC_ductGradientTable({ byGradient: GLINKS.summary.byGradient });
+  assert.deepStrictEqual(gradRows(only)[0], ['Path gradient (N/km)', 'All pairs']);
+  const mism = ctx.MC_ductGradientTable({ byGradient: GLINKS.summary.byGradient, byGradientIntermittent: GLINKS.summary.byGradientIntermittent.slice(1), intermittentPairs: 2 });
+  assert.strictEqual(gradRows(mism)[0].length, 2, 'bins that do not line up: no intermittent column');
+  const odd = ctx.MC_ductGradientTable({ byGradient: [{ fromNkm: null, toNkm: -40, pathSteps: 'x', heardSteps: 3 }, { fromNkm: -62, toNkm: null, pathSteps: 10, heardSteps: 12 }] });
+  assert.deepStrictEqual(gradRows(odd).slice(1).map(r => r[1]), ['—', '100% n=10'], 'non-numeric steps: a dash; heard capped at path');
+  assert.strictEqual(ctx.MC_ductGradBinLabel({ fromNkm: -50, toNkm: null }), '−50 or stronger', 'only the High band says High');
+  assert.strictEqual(ctx.MC_ductGradBinLabel({ fromNkm: null, toNkm: null }), 'all');
+  assert.strictEqual(ctx.MC_ductGradBinLabel({}), 'all');
+});
+
+test('grid legend: the gradient table shows only when the long-link section is open', async () => {
+  const s = await mountGrid();
+  assert.strictEqual(linksToggle(s).attrs['aria-expanded'], 'true');
+  assert.ok(find(legendBox(s), n => n.tagName === 'table').length === 1, 'open: table');
+  const t = legendText(s);
+  assert.ok(t.indexOf('How often the pairs were heard, by path gradient') < t.indexOf('Positions are self-reported'), 'above the caveat');
+  linksToggle(s).fire('click');
+  assert.strictEqual(find(legendBox(s), n => n.tagName === 'table').length, 0, 'folded: no table');
+  assert.ok(legendText(s).indexOf('If ducting matters') < 0);
+  const old = clone(GLINKS);
+  delete old.summary.byGradient; delete old.summary.byGradientIntermittent; delete old.summary.intermittentPairs;
+  const o = await mountGrid({ links: old });
+  assert.strictEqual(find(legendBox(o), n => n.tagName === 'table').length, 0, 'older server: no table, no throw');
+  assert.ok(legendText(o).indexOf(ctxSummary()) >= 0);
+});
+
 test('grid: on add fetches meta and links (historyDays), not /api/ducting; default time = latest <= now', async () => {
   const s = await mountGrid({ window: false });
   assert.strictEqual(callsTo(s, '/api/ducting/meta').length, 1);

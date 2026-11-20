@@ -13,7 +13,60 @@
   "recvMeanGradNkm": -58.4,
   "baselineMeanGradNkm": -49.2,
   "recvEnhancedFrac": 0.41,
-  "baselineEnhancedFrac": 0.22
+  "baselineEnhancedFrac": 0.22,
+  "byGradient": [
+   {
+    "fromNkm": null,
+    "toNkm": -40,
+    "pathSteps": 1200,
+    "heardSteps": 96
+   },
+   {
+    "fromNkm": -40,
+    "toNkm": -50,
+    "pathSteps": 2410,
+    "heardSteps": 241
+   },
+   {
+    "fromNkm": -50,
+    "toNkm": -62,
+    "pathSteps": 830,
+    "heardSteps": 125
+   },
+   {
+    "fromNkm": -62,
+    "toNkm": null,
+    "pathSteps": 160,
+    "heardSteps": 51
+   }
+  ],
+  "intermittentPairs": 2,
+  "byGradientIntermittent": [
+   {
+    "fromNkm": null,
+    "toNkm": -40,
+    "pathSteps": 310,
+    "heardSteps": 9
+   },
+   {
+    "fromNkm": -40,
+    "toNkm": -50,
+    "pathSteps": 402,
+    "heardSteps": 30
+   },
+   {
+    "fromNkm": -50,
+    "toNkm": -62,
+    "pathSteps": 0,
+    "heardSteps": 0
+   },
+   {
+    "fromNkm": -62,
+    "toNkm": null,
+    "pathSteps": 44,
+    "heardSteps": 15
+   }
+  ]
  },
  "links": [
   {
