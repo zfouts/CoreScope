@@ -12,6 +12,11 @@
 - `db.statementTimeoutSec` caps each statement the server runs on PostgreSQL (default 120 seconds, `0` disables).
 - `docker-compose.postgres.yml` adds PostgreSQL to the Compose deployment, and `scripts/postgres-roles.sh` creates the writer and read-only roles.
 - The ingestor on Postgres refuses to start on an empty database while the SQLite file at `dbPath` still holds transmissions, so a forgotten copy cannot silently start a fresh history.
+- **More map providers** (#2428) - new groups, each off until the operator sets `map.tiles.providers.<group>.enabled: true` (an upgrade changes nothing in the picker): EOX (Sentinel-2 satellite 2025 and 2016, Terrain Light, place-label overlays), OSM France (Humanitarian, CyclOSM, OSM Gray, OSM Gray Dark), and the vector styles OpenFreeMap (Liberty, Bright, Positron, Dark, Fiord) and VersaTiles (Colorful, Muted, Gray, Colorful Dark, Gray Dark). Check each group's terms before turning it on: EOX 2025 imagery is non-commercial (CC BY-NC-SA 4.0), OSM France is volunteer-run fair use.
+- **Your own tile servers** - `map.tiles.custom` adds raster (XYZ), vector (MapLibre style) and raster overlay entries as `custom-<id>`, usable in `darkDefault` / `lightDefault`. Invalid entries are skipped with a console warning.
+- **Overlays** - a hillshade overlay shaded in the browser from Terrarium elevation tiles (`map.tiles.providers.hillshade.url` can point at a mirror) and EOX place labels, ticked from a new Overlays group in the picker (each with its group turned on).
+- **The picked map is saved** - a map pinned in the picker survives a reload and applies on every page (the small maps without a picker use it when it suits the current theme); **Auto** clears it.
+- **MapLibre GL vendored** in `public/vendor/` and lazy-loaded (about 380 KB gzipped) only when a vector map is picked; without WebGL the map falls back to the default raster map.
 
 ### Fixed
 - **Server crash on the static musl binaries** - musl gives non-main threads a 128 KiB stack, and deep SQLite queries (`/api/nodes/reported`, rx-coverage on enough data) overflowed it with SIGSEGV. Every musl link now passes `-Wl,-z,stack-size=8388608`.
@@ -33,6 +38,8 @@
 - On Postgres, `GET /api/perf/sqlite` answers 404 and `GET /api/backup` answers 501 (use `pg_dump`).
 - `users.db` migrates to schema v10 with user accounts on (a `rate_limits` table, shared by several server replicas for the account rate limits and notification claims). A v3.18.x binary refuses it afterwards, so keep the pre-upgrade copy for a rollback.
 - CI runs the Go tests and every E2E shard against both SQLite and Postgres, and a new musl job tests the static build.
+- **Every map page follows the provider choice**, including the home page mini-map, with one shared picker (Auto, Street, Topographic, Satellite, Overlays).
+- `docs/deployment.md` Map Tile Providers rewritten to match the real config keys.
 
 ## [3.18.0] - 2026-11-17
 
