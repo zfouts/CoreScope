@@ -23,7 +23,7 @@ import "errors"
 
 // Limits for untrusted input.
 const (
-	MaxMessageBytes = 64 << 20  // a single message larger than this is refused
+	MaxMessageBytes = 64 << 20   // a single message larger than this is refused
 	MaxPoints       = 1440 * 721 // ni*nj above this is refused (0.25° worldwide)
 	MaxBitsPerValue = 32         // packing widths above this are refused
 	MaxGroups       = MaxPoints  // complex packing group count above this is refused

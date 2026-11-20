@@ -25,18 +25,18 @@ import ducting "github.com/meshcore-analyzer/ducting"
 // follow-up list).
 const (
 	ductingGridModel        = "gfs"
-	ductingGridMaxCells     = 4000 // cells per /api/ducting/grid answer
-	ductingLinksMaxKm       = 1000 // receptions over this distance are treated as bad positions
-	ductingLinksMaxPairs    = 500  // node pairs per /api/ducting/links answer, longest first
-	ductingLinksMaxRecv     = 50   // receptions listed per pair, newest first
-	ductingLinksPathKm      = 25.0 // path sample spacing
-	ductingLinksStepWindowS = 5400 // a reception uses the grid step within ±90 min of it
-	ductingLinksDuctFrac    = 0.5  // "during a duct": at least this share of path samples carry LoRa
-	ductingLinksMaxSamples  = 64   // path samples per reception at most
+	ductingGridMaxCells     = 4000   // cells per /api/ducting/grid answer
+	ductingLinksMaxKm       = 1000   // receptions over this distance are treated as bad positions
+	ductingLinksMaxPairs    = 500    // node pairs per /api/ducting/links answer, longest first
+	ductingLinksMaxRecv     = 50     // receptions listed per pair, newest first
+	ductingLinksPathKm      = 25.0   // path sample spacing
+	ductingLinksStepWindowS = 5400   // a reception uses the grid step within ±90 min of it
+	ductingLinksDuctFrac    = 0.5    // "during a duct": at least this share of path samples carry LoRa
+	ductingLinksMaxSamples  = 64     // path samples per reception at most
 	ductingLinksCacheTTL    = 5 * 60 // seconds a computed links answer is reused (same days, data generation, run, visibility)
-	ductingLinksMaxMemo     = 5000 // per-reception results remembered across rebuilds, keyed by (observation, run_time)
-	ductingGridLRUSteps     = 8    // decoded steps kept in memory (~3.4 MB each at 0.5°)
-	ductingGridMaxAgeS      = 600  // Cache-Control max-age of /api/ducting/grid
+	ductingLinksMaxMemo     = 5000   // per-reception results remembered across rebuilds, keyed by (observation, run_time)
+	ductingGridLRUSteps     = 8      // decoded steps kept in memory (~3.4 MB each at 0.5°)
+	ductingGridMaxAgeS      = 600    // Cache-Control max-age of /api/ducting/grid
 	ductingHistoryDaysMax   = 30
 )
 
