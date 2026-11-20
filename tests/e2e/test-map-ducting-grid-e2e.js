@@ -10,10 +10,14 @@
  * fixture comes from the ingestor's own write path, relative to now, so the
  * slider always has past ("analysis") and future ("forecast") steps:
  * cmd/ingestor/ducting_e2e_fixture_test.go writes 33 steps (48 h back to
- * 48 h ahead, every 3 h) over the fixture's nodes and two long links (signed
- * zero-hop ADVERTs heard directly ~110 km away): one during a modelled
- * surface duct whose sender is named EVIL_NAME below, one without a duct
- * named PLAIN_NAME. Keep these names in step with that file.
+ * 48 h ahead, every 3 h) over the fixture's nodes and three long links of
+ * ~110 km (signed ADVERTs): heard by an observer node in the High band
+ * (mean dN/dh -96 N/km along the path; sender named EVIL_NAME below), heard
+ * by an observer node on a normal path (PLAIN_NAME), and relayed with one
+ * certain 2-byte hop in the High band (RELAY_NAME, via "relay"). Keep these
+ * names in step with that file. The server config has no LoS terrain, so
+ * pairs count by the smooth-earth horizon (losMethod "smooth-earth"); no
+ * terrain is ever downloaded.
  *
  * CI: GitHub Actions E2E job (.github/workflows/deploy.yml, e2e shard 1),
  * server on 13598, `suite 1 test-map-ducting-grid-e2e.js`.
@@ -45,8 +49,12 @@ const { loraFreqsOf, assert, sleep, openPicker, setOverlayUi, pageState, inPageO
 const BASE = (process.env.BASE_URL || 'http://localhost:13598').replace(/\/+$/, '');
 const EVIL_NAME = '<img src=x onerror=__dx=1>&"Q"';
 const PLAIN_NAME = 'E2E Duct Far Repeater';
+const RELAY_NAME = 'E2E Duct Relay Origin';
 const LINK_WINDOW_S = 90 * 60;   // map-ducting.js LINK_WINDOW_S
-const LINK_DUCT_FRAC = 0.5;      // map-ducting.js LINK_DUCT_FRAC
+const LINK_ENHANCED_FRAC = 0.5;  // map-ducting.js LINK_ENHANCED_FRAC (server: ductingLinksDuctFrac)
+const MINUS = '\u2212';
+const grad = (v) => (Math.round(v) < 0 ? MINUS + Math.abs(Math.round(v)) : String(Math.round(v))) + ' N/km';
+const pct = (f) => Math.round(f * 100) + '%';
 const newPage = (browser, opts) => DE.newPage(browser, BASE, opts);
 const gotoRoute = (page, hash, waitControl) => DE.gotoRoute(page, BASE, hash, waitControl);
 const R = DE.createRunner();
@@ -67,16 +75,18 @@ function defaultIndex(times) {
 }
 
 // The links drawn at time t: a reception within +-90 min; kind of the
-// nearest one ('duct' at >= half the path ducted, 'plain' below, 'nodata'
-// without a stored step). The test's own reading of the endpoint contract.
+// nearest one: 'nodata' without a modelled path gradient (meanGradNkm null),
+// else 'duct' (the emphasized colour) when half or more of the path is in
+// the High band (highFrac >= 0.5), else 'plain'. The test's own reading of
+// the endpoint contract.
 function expectedLinks(links, t) {
   const out = [];
   for (const l of links) {
     const near = l.receptions.filter(r => Math.abs(r.t - t) <= LINK_WINDOW_S)
       .sort((x, y) => (Math.abs(x.t - t) - Math.abs(y.t - t)) || (x.t - y.t));
     if (!near.length) continue;
-    const f = near[0].ductFrac;
-    out.push({ link: l, kind: !(f >= 0) ? 'nodata' : f >= LINK_DUCT_FRAC ? 'duct' : 'plain' });
+    const r = near[0];
+    out.push({ link: l, kind: r.meanGradNkm == null ? 'nodata' : r.highFrac >= LINK_ENHANCED_FRAC ? 'duct' : 'plain' });
   }
   return out;
 }
@@ -188,21 +198,28 @@ async function run() {
     const times = meta.times;
     const defIdx = defaultIndex(times);
 
-    let evil = null, plain = null, tEvil = 0, tPlain = 0;
-    await test('/api/ducting/links: the seeded long links, one during a modelled duct', async () => {
+    let evil = null, plain = null, relay = null, tEvil = 0, tPlain = 0, tRelay = 0, method = '';
+    await test('/api/ducting/links: the seeded links (observer and relay evidence), High band and normal paths', async () => {
       links = await getJson(`/api/ducting/links?days=${cfg.ducting.historyDays}`);
       assert(links.status === 'ok' && Array.isArray(links.links) && links.days === cfg.ducting.historyDays && links.freqMHz > 0, 'links: ' + JSON.stringify(links).slice(0, 300));
       evil = links.links.find(l => l.a.name === EVIL_NAME);
       plain = links.links.find(l => l.a.name === PLAIN_NAME);
-      assert(evil && plain, `seeded links missing (names: ${links.links.map(l => l.a.name).join(' | ')})`);
-      const re = evil.receptions.find(r => r.ductFrac >= LINK_DUCT_FRAC);
-      const rp = plain.receptions.find(r => r.ductFrac >= 0 && r.ductFrac < LINK_DUCT_FRAC);
-      assert(re && rp, 'receptions: ' + JSON.stringify([evil.receptions, plain.receptions]));
-      tEvil = re.t; tPlain = rp.t;
-      assert(times.includes(tEvil) && times.includes(tPlain), 'reception times are not stored steps');
-      assert(evil.distKm > evil.horizonKm && evil.count === 2 && evil.b.name, 'evil link: ' + JSON.stringify(evil).slice(0, 300));
+      relay = links.links.find(l => l.a.name === RELAY_NAME);
+      assert(evil && plain && relay, `seeded links missing (names: ${links.links.map(l => l.a.name).join(' | ')})`);
+      method = links.summary.losMethod;
+      assert(method === 'smooth-earth', `losMethod ${method}: the E2E server must not use LoS terrain (deterministic, no downloads)`);
+      const re = evil.receptions.find(r => r.via === 'observer' && r.highFrac >= LINK_ENHANCED_FRAC && r.meanGradNkm <= -62 && r.ductFrac >= 0.5 && r.snr != null);
+      const rp = plain.receptions.find(r => r.via === 'observer' && r.meanGradNkm != null && r.highFrac >= 0 && r.highFrac < LINK_ENHANCED_FRAC);
+      const rr = relay.receptions.find(r => r.via === 'relay' && r.highFrac >= LINK_ENHANCED_FRAC && r.snr == null && r.rssi == null);
+      assert(re && rp && rr, 'receptions: ' + JSON.stringify([evil.receptions, plain.receptions, relay.receptions]));
+      assert(relay.b.pubkey === plain.a.pubkey, 'the relay link is not received by the seeded relay: ' + JSON.stringify(relay.b));
+      tEvil = re.t; tPlain = rp.t; tRelay = rr.t;
+      assert([tEvil, tPlain, tRelay].every(t => times.includes(t)), 'reception times are not stored steps');
+      assert([evil, plain, relay].every(l => l.distKm > l.horizonKm), 'a seeded link inside the radio horizon');
+      assert(evil.count === 2 && evil.b.name, 'evil link: ' + JSON.stringify(evil).slice(0, 300));
       const s = links.summary;
-      assert(s.links >= 2 && s.receptions >= 3 && s.withGrid <= s.receptions && s.duringDuct <= s.withGrid && s.baselineDuctFrac >= 0 && s.baselineDuctFrac <= 1, 'summary: ' + JSON.stringify(s));
+      assert(s.links >= 3 && s.receptions >= 4 && s.withGrid <= s.receptions && s.duringDuct <= s.withGrid && s.unverifiedPairs === 0, 'summary: ' + JSON.stringify(s));
+      assert(s.recvMeanGradNkm != null && s.baselineMeanGradNkm != null && s.recvEnhancedFrac >= 0 && s.recvEnhancedFrac <= 1 && s.baselineEnhancedFrac >= 0 && s.baselineEnhancedFrac <= 1, 'summary gradients: ' + JSON.stringify(s));
     });
 
     // ── Map page ──
@@ -361,41 +378,66 @@ async function run() {
       return want;
     }
 
-    await test('at the time of the ducted reception its link is drawn as ducted; every drawn link matches /api/ducting/links', async () => {
+    await test('at the time of the High-band reception its link is drawn emphasized; every drawn link matches /api/ducting/links', async () => {
       await setSlider(page, times.indexOf(tEvil));
       await waitWindow(page, tEvil);
       await showLink(page, evil);
       const want = await checkDrawnLinks(page, tEvil);
-      assert(want.some(x => x.link === evil && x.kind === 'duct'), 'the seeded ducted link is not expected as ducted');
+      assert(want.some(x => x.link === evil && x.kind === 'duct'), 'the seeded High-band link is not expected as emphasized');
     });
+
+    // Clicks along link l until its popup opens (another link or a marker
+    // may sit on a point); returns the popup text.
+    async function openLinkPopup(pg, l) {
+      for (const f of [0.5, 0.42, 0.58, 0.35, 0.65, 0.28, 0.72]) {
+        const p = await pg.evaluate(DE.inPagePoint, { lat: l.a.lat + (l.b.lat - l.a.lat) * f, lon: l.a.lon + (l.b.lon - l.a.lon) * f });
+        if (p.blocked) continue;
+        await pg.mouse.click(p.x, p.y);
+        try {
+          await pg.waitForSelector('.leaflet-popup .mc-duct-link-popup', { timeout: 2000 });
+        } catch (_) { continue; }
+        const t = await pg.locator('.leaflet-popup .mc-duct-link-popup').first().innerText();
+        if (t.includes('Sent by: ' + l.a.name)) return t;
+        await pg.evaluate(`${firstMap}.closePopup()`);
+        await pg.waitForSelector('.leaflet-popup .mc-duct-link-popup', { state: 'detached', timeout: 2000 }).catch(() => {});
+      }
+      throw new Error('could not open the popup of ' + l.a.name);
+    }
 
     await test('clicking the link opens its popup; the node-chosen name is text, never markup; the click still reaches the map', async () => {
       const pre = await page.evaluate(() => typeof window.__dx);
       assert(pre === 'undefined', 'the sender name already ran as markup somewhere on the map page (window.__dx is set)');
       await page.evaluate(`(() => { const m = ${firstMap}; window.__ductClicks = 0; window.__ductOn = () => { window.__ductClicks++; }; m.on('click', window.__ductOn); })()`);
-      let text = null, pt = null;
-      for (const f of [0.5, 0.42, 0.58, 0.35, 0.65, 0.28, 0.72]) {
-        const p = await page.evaluate(DE.inPagePoint, { lat: evil.a.lat + (evil.b.lat - evil.a.lat) * f, lon: evil.a.lon + (evil.b.lon - evil.a.lon) * f });
-        if (p.blocked) continue;
-        await page.mouse.click(p.x, p.y);
-        try {
-          await page.waitForSelector('.leaflet-popup .mc-duct-link-popup', { timeout: 2000 });
-        } catch (_) { continue; }
-        const t = await page.locator('.leaflet-popup .mc-duct-link-popup').first().innerText();
-        if (t.includes('Sent by: ' + EVIL_NAME)) { text = t; pt = p; break; }
-        await page.evaluate(`${firstMap}.closePopup()`);
-      }
-      assert(text, 'could not open the popup of the seeded link');
+      const text = await openLinkPopup(page, evil);
       const res = await page.evaluate(`(() => { const m = ${firstMap}; m.off('click', window.__ductOn); const box = document.querySelector('.leaflet-popup .mc-duct-link-popup');
         return { clicks: window.__ductClicks, imgs: box.querySelectorAll('img').length, dx: typeof window.__dx, cellPopup: !!document.querySelector('.leaflet-popup .mc-duct-popup:not(.mc-duct-link-popup)') }; })()`);
       assert(res.imgs === 0 && res.dx === 'undefined', 'the name was rendered as markup: ' + JSON.stringify(res));
       assert(res.clicks >= 1, 'the page\'s map click listener did not get the click: ' + JSON.stringify(res));
       assert(!res.cellPopup, 'a cell popup opened over the link popup');
       assert(/^Long link, heard directly/.test(text) && text.includes('Heard by: ' + evil.b.name), 'popup: ' + text);
-      assert(text.includes(`${Math.round(evil.distKm)} km apart; radio horizon ${Math.round(evil.horizonKm)} km`), 'popup distances: ' + text);
-      assert(text.includes('Heard 2 times in the period') && /modelled duct along 100% of the path/.test(text), 'popup receptions: ' + text);
-      assert(text.includes(`can carry ${Math.round(links.freqMHz * 1000) / 1000} MHz`), 'popup frequency: ' + text);
-      assert(pt, 'no click point');
+      assert(text.includes(`${Math.round(evil.distKm)} km apart; radio horizon ${Math.round(evil.horizonKm)} km`), 'popup distances (smooth-earth): ' + text);
+      const r = evil.receptions.find(x => x.t === tEvil);
+      const line = text.split('\n').find(x => x.includes('heard directly by the observer')) || '';
+      assert(line.includes('SNR ') && line.includes('path gradient ' + grad(r.meanGradNkm)) && line.includes('High band or stronger along ' + pct(r.highFrac) + ' of the path') &&
+        line.includes('LoRa duct along ' + pct(r.ductFrac)), 'popup reception line: ' + line + ' / ' + text);
+      assert(text.includes('Heard 2 times in the period'), 'popup count: ' + text);
+      assert(text.includes('High band: ' + grad(-62) + ' or stronger') && text.includes(`may carry ${Math.round(links.freqMHz * 1000) / 1000} MHz`), 'popup note: ' + text);
+    });
+
+    await test('the relay-evidence link is drawn emphasized at its time; its popup says relayed, without SNR', async () => {
+      await setSlider(page, times.indexOf(tRelay));
+      await waitWindow(page, tRelay);
+      await showLink(page, relay);
+      const want = await checkDrawnLinks(page, tRelay);
+      assert(want.some(x => x.link === relay && x.kind === 'duct'), 'the seeded relay link is not expected as emphasized');
+      const text = await openLinkPopup(page, relay);
+      const line = text.split('\n').find(x => x.includes('relayed: the second repeater heard the first directly')) || '';
+      assert(line && !/SNR|RSSI/.test(line) && line.includes('High band or stronger along 100% of the path'), 'relay reception line: ' + line + ' / ' + text);
+      assert(text.includes('Heard by: ' + PLAIN_NAME), 'relay popup: ' + text);
+      await setSlider(page, times.indexOf(tEvil));
+      await waitWindow(page, tEvil);
+      await showLink(page, evil);
+      await openLinkPopup(page, evil);
     });
 
     await test('moving the slider away closes the link popup and drops the link; the no-duct link is drawn plain at its time', async () => {
@@ -414,14 +456,35 @@ async function run() {
       assert(want.some(x => x.link === plain && x.kind === 'plain'), 'the seeded no-duct link is not expected as plain');
     });
 
-    await test('legend: the period summary of the long links', async () => {
+    await test('legend: the period summary leads with the gradient comparison, beyond the radio horizon', async () => {
       const s = links.summary, days = links.days;
       const txt = await page.locator('.mc-duct-links-summary').first().textContent();
-      const pl = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
-      assert(txt.startsWith(`Last ${days} days: ${pl(s.receptions, 'direct reception')} beyond the radio horizon on ${pl(s.links, 'node pair')}.`), 'summary: ' + txt);
-      if (s.withGrid) assert(txt.includes(`${Math.round(Math.min(s.duringDuct, s.withGrid) / s.withGrid * 100)}% were during a modelled duct along the path`), 'summary share: ' + txt);
-      assert(txt.endsWith(`the same paths were ducted ${Math.round(s.baselineDuctFrac * 100)}% of the time overall.`), 'summary baseline: ' + txt);
-      assert(txt === await page.evaluate((a) => window.MC_ductLinksSummary(a.s, a.d), { s, d: days }), 'legend differs from MC_ductLinksSummary');
+      const n = (v, w) => `${v.toLocaleString('en-US')} ${w}${v === 1 ? '' : 's'}`;
+      let want = `Last ${days} days: ${n(s.receptions, 'reception')} on ${n(s.links, 'node pair')} beyond the radio horizon.` +
+        ` Along their paths the modelled refractivity gradient averaged ${grad(s.recvMeanGradNkm)} when heard, against ${grad(s.baselineMeanGradNkm)} for the same paths over the whole period;` +
+        ` half or more of the path was in the High band or stronger for ${pct(s.recvEnhancedFrac)} of receptions vs ${pct(s.baselineEnhancedFrac)} overall.`;
+      if (s.duringDuct) want += ` Half or more of the path was in a modelled duct that may carry LoRa for ${n(s.duringDuct, 'reception')}.`;
+      assert(txt === want, `summary:\n  got  ${txt}\n  want ${want}`);
+      assert(txt === await page.evaluate((a) => window.MC_ductLinksSummary(a.s, a.d, a.m), { s, d: days, m: method }), 'legend differs from MC_ductLinksSummary');
+    });
+
+    await test('legend: "Observed long links" folds on a short screen (800 px) and opens on click, still clear of the other controls', async () => {
+      const tog = page.locator('.mc-duct-links-toggle').first();
+      assert((await tog.getAttribute('aria-expanded')) === 'false', 'long-link section not folded at 800 px tall');
+      const keyRow = 'Half or more of the path in the High band or stronger (model)';
+      let legend = await page.locator('.mc-duct-legend').first().textContent();
+      assert(!legend.includes(keyRow) && legend.includes('Last ') && /On the map: |None heard within/.test(legend), 'folded section: ' + legend.slice(0, 500));
+      await tog.click();
+      await page.waitForFunction(() => { const t = document.querySelector('.mc-duct-links-toggle'); return t && t.getAttribute('aria-expanded') === 'true'; }, null, { timeout: 3000 });
+      legend = await page.locator('.mc-duct-legend').first().textContent();
+      assert(legend.includes(keyRow) && legend.includes('Less of the path in the High band') && legend.includes('Dashed: no model data for that time'), 'open section: ' + legend.slice(0, 600));
+      assert(await page.evaluate(() => document.activeElement && document.activeElement.classList.contains('mc-duct-links-toggle')), 'the toggle lost the focus');
+      const ov = await page.evaluate(inPageOverlaps);
+      assert(!ov.hits.length, 'open: ' + ov.hits.join('; '));
+      const sc = await page.evaluate(() => { const b = document.querySelector('.mc-duct-legend'); return { sh: b.scrollHeight, ch: b.clientHeight, oy: getComputedStyle(b).overflowY }; });
+      assert(sc.oy === 'auto' && sc.ch > 0, 'legend scroll ' + JSON.stringify(sc));
+      await page.locator('.mc-duct-links-toggle').first().click();
+      await page.waitForFunction(() => { const t = document.querySelector('.mc-duct-links-toggle'); return t && t.getAttribute('aria-expanded') === 'false'; }, null, { timeout: 3000 });
     });
 
     await test('disabling the overlay removes everything it drew and its URL parameters', async () => {
