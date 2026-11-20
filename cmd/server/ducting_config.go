@@ -95,8 +95,15 @@ func (c *DuctingConfig) source() string {
 // historyDays is the effective ducting.historyDays (resolved() warns about
 // an out-of-range value). Safe on a nil config.
 func (c *DuctingConfig) historyDays() int {
-	if c == nil || c.HistoryDays < 1 || c.HistoryDays > ductingHistoryDaysMax {
+	// Clamped exactly as the ingestor does (cmd/ingestor/ducting_grid_config.go),
+	// so the server never advertises more or fewer days than are kept.
+	switch {
+	case c == nil || c.HistoryDays == 0:
 		return defaultDuctingHistoryDays
+	case c.HistoryDays < 1:
+		return 1
+	case c.HistoryDays > ductingHistoryDaysMax:
+		return ductingHistoryDaysMax
 	}
 	return c.HistoryDays
 }
@@ -119,7 +126,7 @@ func (c *DuctingConfig) resolved() (DuctingConfig, []string) {
 	}
 	r.HistoryDays = c.historyDays()
 	if c.HistoryDays != 0 && c.HistoryDays != r.HistoryDays {
-		warns = append(warns, fmt.Sprintf("ducting.historyDays must be 1..%d, using %d", ductingHistoryDaysMax, defaultDuctingHistoryDays))
+		warns = append(warns, fmt.Sprintf("ducting.historyDays must be 1..%d, using %d", ductingHistoryDaysMax, r.HistoryDays))
 	}
 	// GridBaseURL is the ingestor's (it downloads the GFS files); the server
 	// never reads it, so it is neither validated nor kept here.

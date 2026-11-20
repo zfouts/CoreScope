@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"math"
 	"os"
@@ -294,9 +295,11 @@ func TestDuctingSourceAndHistoryDays(t *testing.T) {
 			t.Errorf("historyDays %d: %d %v", d, r.HistoryDays, warns)
 		}
 	}
-	for _, d := range []int{-1, 31, 365} {
+	// Out of range is clamped, the same rule as the ingestor's, so both
+	// agree on how many days exist.
+	for d, want := range map[int]int{-1: 1, -30: 1, 31: 30, 365: 30} {
 		r, warns := (&DuctingConfig{HistoryDays: d}).resolved()
-		if r.HistoryDays != 7 || !hasWarn(warns, "ducting.historyDays must be 1..30, using 7") {
+		if r.HistoryDays != want || !hasWarn(warns, fmt.Sprintf("ducting.historyDays must be 1..30, using %d", want)) {
 			t.Errorf("historyDays %d: %d %v", d, r.HistoryDays, warns)
 		}
 	}
