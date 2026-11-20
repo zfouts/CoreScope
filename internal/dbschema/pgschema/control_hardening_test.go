@@ -107,11 +107,11 @@ func TestControlHardeningMigrationFromV2(t *testing.T) {
 	if err := Apply(ctx, db, rec.logf); err != nil {
 		t.Fatalf("Apply on a v2 database: %v", err)
 	}
-	if n, m := rec.count("applied migration"), rec.count("0003_control_hardening.sql"); n != 1 || m != 1 {
-		t.Errorf("upgrade from v2 logged %d applications (%d of 0003), want only 0003: %v", n, m, rec.lines)
+	if n, m := rec.count("applied migration"), rec.count("0003_control_hardening.sql"); n != 2 || m != 1 {
+		t.Errorf("upgrade from v2 logged %d applications (%d of 0003), want 0003 and 0004: %v", n, m, rec.lines)
 	}
-	if got := versionRows(t, db); len(got) != 3 || got[2] != 3 {
-		t.Errorf("schema_version = %v, want [1 2 3]", got)
+	if got := versionRows(t, db); len(got) != 4 || got[3] != 4 {
+		t.Errorf("schema_version = %v, want [1 2 3 4]", got)
 	}
 
 	for _, tp := range controlTablePrivs {

@@ -146,8 +146,8 @@ func TestApplyCreatesSchemaAndIsIdempotent(t *testing.T) {
 		WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'`).Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if tables != 27 { // 26 SQLite tables + schema_version
-		t.Errorf("base tables = %d, want 27", tables)
+	if tables != 28 { // 27 SQLite tables + schema_version
+		t.Errorf("base tables = %d, want 28", tables)
 	}
 	for _, rel := range []string{"packets_v", "idx_observations_dedup", "idx_observers_iata_norm", "idx_tx_last_seen_zero"} {
 		if !relationExists(t, db, rel) {

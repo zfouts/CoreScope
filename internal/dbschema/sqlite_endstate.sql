@@ -134,6 +134,17 @@ CREATE TABLE dropped_packets (
 				dropped_at DATETIME DEFAULT CURRENT_TIMESTAMP
 			);
 
+-- table ducting_grid
+CREATE TABLE ducting_grid (
+			model      TEXT NOT NULL,
+			valid_time INTEGER NOT NULL,
+			run_time   INTEGER NOT NULL,
+			lead_hours INTEGER NOT NULL,
+			data       BLOB NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (model, valid_time)
+		);
+
 -- table inactive_nodes
 CREATE TABLE inactive_nodes (
 			public_key TEXT PRIMARY KEY,
