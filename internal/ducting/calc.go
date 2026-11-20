@@ -62,7 +62,12 @@ func clampRH(rh float64) float64 {
 // skipped and only the height check applies.
 func Profile(elevation, surfPHPa, t2mC, rh2mPct float64, levelsHPa, tempsC, rhsPct, geoHeightsM []float64) []Level {
 	n := shortest(len(levelsHPa), len(tempsC), len(rhsPct), len(geoHeightsM))
-	out := make([]Level, 0, n+1)
+	return profileInto(make([]Level, 0, n+1), elevation, surfPHPa, t2mC, rh2mPct, levelsHPa, tempsC, rhsPct, geoHeightsM)
+}
+
+// profileInto is Profile appending to out (len 0, any capacity).
+func profileInto(out []Level, elevation, surfPHPa, t2mC, rh2mPct float64, levelsHPa, tempsC, rhsPct, geoHeightsM []float64) []Level {
+	n := shortest(len(levelsHPa), len(tempsC), len(rhsPct), len(geoHeightsM))
 	if saneLevel(surfPHPa, t2mC, rh2mPct) {
 		out = append(out, Level{
 			HeightAGL:   SurfaceHeightM,
@@ -110,9 +115,39 @@ func Profile(elevation, surfPHPa, t2mC, rh2mPct float64, levelsHPa, tempsC, rhsP
 // Analyze computes N and M for each level of an ascending profile and
 // classifies it (see analyzeM).
 func Analyze(profile []Level) Result {
-	h := make([]float64, len(profile))
-	m := make([]float64, len(profile))
-	n := make([]float64, len(profile))
+	n := len(profile)
+	return analyzeInto(profile, make([]float64, n), make([]float64, n), make([]float64, n))
+}
+
+// Scratch owns the buffers Profile and Analyze would otherwise allocate per
+// call, so a loop over many points (the global grid job) allocates nothing
+// once the buffers have grown. Not safe for concurrent use: one per goroutine.
+// Results are identical to the package-level Profile and Analyze.
+type Scratch struct {
+	levels  []Level
+	h, m, n []float64
+}
+
+// Profile is the package-level Profile writing into the scratch buffer. The
+// returned slice is valid until the next Profile call on s.
+func (s *Scratch) Profile(elevation, surfPHPa, t2mC, rh2mPct float64, levelsHPa, tempsC, rhsPct, geoHeightsM []float64) []Level {
+	n := shortest(len(levelsHPa), len(tempsC), len(rhsPct), len(geoHeightsM))
+	s.levels = slices.Grow(s.levels[:0], n+1)
+	s.levels = profileInto(s.levels, elevation, surfPHPa, t2mC, rh2mPct, levelsHPa, tempsC, rhsPct, geoHeightsM)
+	return s.levels
+}
+
+// Analyze is the package-level Analyze using the scratch buffers.
+func (s *Scratch) Analyze(profile []Level) Result {
+	n := len(profile)
+	s.h = slices.Grow(s.h[:0], n)[:n]
+	s.m = slices.Grow(s.m[:0], n)[:n]
+	s.n = slices.Grow(s.n[:0], n)[:n]
+	return analyzeInto(profile, s.h, s.m, s.n)
+}
+
+// analyzeInto fills h, m, n (each len(profile)) and classifies the profile.
+func analyzeInto(profile []Level, h, m, n []float64) Result {
 	for i, l := range profile {
 		h[i] = l.HeightAGL
 		n[i] = Refractivity(l.PressureHPa, l.TempC, l.RHPct)

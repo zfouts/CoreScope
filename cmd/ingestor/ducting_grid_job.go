@@ -169,8 +169,11 @@ type ductingGridJob struct {
 	maxMsg  int64
 	workers int // compute workers
 
-	now     func() time.Time
-	sleep   func(ctx context.Context, d time.Duration) bool // false when ctx ended first
+	now   func() time.Time
+	sleep func(ctx context.Context, d time.Duration) bool // false when ctx ended first
+	// analyze overrides the physics (tests inject failures). nil, the
+	// default, runs the allocation-free ducting.Scratch path, which gives
+	// the same results as ducting.Analyze(ducting.Profile(...)).
 	analyze func([]ducting.Level) ducting.Result
 	logf    func(format string, args ...any)
 }
@@ -200,13 +203,18 @@ func newDuctingGridJob(store ductingGridStore, s ductingGridSettings) *ductingGr
 		budget:        ductingGridCycleBudget,
 		maxIdx:        ductingGridMaxIdxBytes,
 		maxMsg:        ductingGridMaxMsgBytes,
-		workers:       runtime.GOMAXPROCS(0),
+		workers:       ductingGridWorkers(runtime.GOMAXPROCS(0)),
 		now:           time.Now,
 		sleep:         sleepCtx,
-		analyze:       ducting.Analyze,
 		logf:          log.Printf,
 	}
 }
+
+// ductingGridWorkers is the compute worker count for procs available CPUs:
+// one fewer, so the MQTT ingest sharing the process always has a core to run
+// on while a step is computed (a step is ~0.2 s of CPU, 17 steps a run, so the
+// run takes slightly longer on a multi-core host; a 1-CPU host keeps 1 worker).
+func ductingGridWorkers(procs int) int { return max(1, procs-1) }
 
 // sleepCtx waits d or until ctx ends; false when ctx ended.
 func sleepCtx(ctx context.Context, d time.Duration) bool {
@@ -832,6 +840,7 @@ func (j *ductingGridJob) computeRows(ctx context.Context, fields *ductingGridFie
 	temps := make([]float64, nl)
 	rhs := make([]float64, nl)
 	hgts := make([]float64, nl)
+	var sc ducting.Scratch
 	f := fields
 	for {
 		r0 := int(next.Add(ductingGridRowChunk)) - ductingGridRowChunk
@@ -848,9 +857,13 @@ func (j *ductingGridJob) computeRows(ctx context.Context, fields *ductingGridFie
 				rhs[i] = float64(f[slotRh(i)][idx])
 				hgts[i] = float64(f[slotHgt(i)][idx])
 			}
-			p := ducting.Profile(float64(f[slotHgtSfc][idx]), float64(f[slotPresSfc][idx])/100,
+			p := sc.Profile(float64(f[slotHgtSfc][idx]), float64(f[slotPresSfc][idx])/100,
 				float64(f[slotTmp2m][idx])-273.15, float64(f[slotRh2m][idx]), levels, temps, rhs, hgts)
-			g.Set(idx, j.analyze(p))
+			if j.analyze != nil {
+				g.Set(idx, j.analyze(p))
+			} else {
+				g.Set(idx, sc.Analyze(p))
+			}
 		}
 	}
 }

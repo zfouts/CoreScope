@@ -294,6 +294,17 @@ func (s *ductingGridService) put(g *ducting.Grid) {
 // is logged once per (valid time, run) and reported as
 // errDuctingStepUnavailable from then on without decoding it again.
 func (s *ductingGridService) Load(validTime int64) (*ducting.Grid, error) {
+	return s.load(validTime, s.decode)
+}
+
+// LoadPlanes is Load for scans that only sample the C and F planes
+// (PathStats): the grid comes from d, carries only those planes, and is valid
+// until d's next use. Same errors, bad-step memory and decode slots as Load.
+func (s *ductingGridService) LoadPlanes(validTime int64, d *ducting.Decoder) (*ducting.Grid, error) {
+	return s.load(validTime, d.DecodePlanes)
+}
+
+func (s *ductingGridService) load(validTime int64, decode func([]byte) (*ducting.Grid, error)) (*ducting.Grid, error) {
 	data, run, err := s.store.ductingGridBlob(s.model, validTime)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errDuctingStepAbsent
@@ -306,7 +317,7 @@ func (s *ductingGridService) Load(validTime int64) (*ducting.Grid, error) {
 		return nil, errDuctingStepUnavailable
 	}
 	s.slots <- struct{}{}
-	g, err := s.decode(data)
+	g, err := decode(data)
 	<-s.slots
 	if err == nil && (g == nil || g.ValidTime != validTime || g.RunTime != run || g.Model != s.model) {
 		err = errors.New("grid header does not match its row")

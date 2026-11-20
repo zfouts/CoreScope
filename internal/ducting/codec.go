@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 )
 
 // decodeMaxInput bounds the encoded size Decode accepts. A 0.25° worldwide
@@ -149,66 +150,78 @@ func Encode(g *Grid) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// gridHeader is a validated encoded-grid header.
+type gridHeader struct {
+	model                  string
+	lat0, lon0, dLat, dLon float64
+	runTime, validTime     int64
+	ni, nj                 int
+	payload                []byte // the DEFLATE stream
+}
+
+// parseHeader validates the header of an encoded grid and returns it with
+// the DEFLATE payload. Nothing is allocated beyond the model string.
+func parseHeader(b []byte) (gridHeader, error) {
+	var gh gridHeader
+	if len(b) > decodeMaxInput {
+		return gh, fmt.Errorf("ducting: encoded grid %d bytes exceeds %d", len(b), decodeMaxInput)
+	}
+	if len(b) < 6 {
+		return gh, errors.New("ducting: encoded grid truncated")
+	}
+	if string(b[:4]) != GridMagic {
+		return gh, errors.New("ducting: bad grid magic")
+	}
+	if b[4] != GridVersion {
+		return gh, fmt.Errorf("ducting: unsupported grid version %d", b[4])
+	}
+	ml := int(b[5])
+	if len(b) < 6+ml+gridHeaderFixed {
+		return gh, errors.New("ducting: encoded grid header truncated")
+	}
+	gh.model = string(b[6 : 6+ml])
+	h := b[6+ml : 6+ml+gridHeaderFixed]
+	le := binary.LittleEndian
+	ni := int64(le.Uint32(h[0:]))
+	nj := int64(le.Uint32(h[4:]))
+	gh.lat0 = math.Float64frombits(le.Uint64(h[8:]))
+	gh.lon0 = math.Float64frombits(le.Uint64(h[16:]))
+	gh.dLat = math.Float64frombits(le.Uint64(h[24:]))
+	gh.dLon = math.Float64frombits(le.Uint64(h[32:]))
+	gh.runTime = int64(le.Uint64(h[40:]))
+	gh.validTime = int64(le.Uint64(h[48:]))
+	if err := checkLattice(gh.model, gh.lat0, gh.lon0, gh.dLat, gh.dLon, ni, nj); err != nil {
+		return gh, err
+	}
+	gh.ni, gh.nj = int(ni), int(nj)
+	gh.payload = b[6+ml+gridHeaderFixed:]
+	return gh, nil
+}
+
 // Decode parses an encoded grid. It reads database contents, so it trusts
 // nothing: the input size, every header field and the inflated payload size
 // are bounded before anything is allocated, and the payload must inflate to
 // exactly ni*nj*13 bytes with nothing after the DEFLATE stream.
 func Decode(b []byte) (*Grid, error) {
-	if len(b) > decodeMaxInput {
-		return nil, fmt.Errorf("ducting: encoded grid %d bytes exceeds %d", len(b), decodeMaxInput)
-	}
-	if len(b) < 6 {
-		return nil, errors.New("ducting: encoded grid truncated")
-	}
-	if string(b[:4]) != GridMagic {
-		return nil, errors.New("ducting: bad grid magic")
-	}
-	if b[4] != GridVersion {
-		return nil, fmt.Errorf("ducting: unsupported grid version %d", b[4])
-	}
-	ml := int(b[5])
-	if len(b) < 6+ml+gridHeaderFixed {
-		return nil, errors.New("ducting: encoded grid header truncated")
-	}
-	model := string(b[6 : 6+ml])
-	h := b[6+ml : 6+ml+gridHeaderFixed]
-	le := binary.LittleEndian
-	ni := int64(le.Uint32(h[0:]))
-	nj := int64(le.Uint32(h[4:]))
-	lat0 := math.Float64frombits(le.Uint64(h[8:]))
-	lon0 := math.Float64frombits(le.Uint64(h[16:]))
-	dLat := math.Float64frombits(le.Uint64(h[24:]))
-	dLon := math.Float64frombits(le.Uint64(h[32:]))
-	runTime := int64(le.Uint64(h[40:]))
-	validTime := int64(le.Uint64(h[48:]))
-	if err := checkLattice(model, lat0, lon0, dLat, dLon, ni, nj); err != nil {
+	gh, err := parseHeader(b)
+	if err != nil {
 		return nil, err
 	}
-
-	n := int(ni * nj)
+	n := gh.ni * gh.nj
 	expected := int64(n) * GridBytesPerPoint
 	raw := make([]byte, expected)
-	src := bytes.NewReader(b[6+ml+gridHeaderFixed:])
+	src := bytes.NewReader(gh.payload)
 	fr := flate.NewReader(src)
 	defer fr.Close()
 	lr := io.LimitReader(fr, expected+1)
 	if _, err := io.ReadFull(lr, raw); err != nil {
 		return nil, fmt.Errorf("ducting: grid payload: %w", err)
 	}
-	var extra [1]byte
-	switch _, err := io.ReadFull(lr, extra[:]); {
-	case err == nil:
-		return nil, errors.New("ducting: grid payload inflates past ni*nj*13 bytes")
-	case err != io.EOF:
-		return nil, fmt.Errorf("ducting: grid payload: %w", err)
-	}
-	// bytes.Reader is an io.ByteReader, so flate reads it byte by byte
-	// without read-ahead: whatever is left is not part of the stream.
-	if src.Len() != 0 {
-		return nil, fmt.Errorf("ducting: %d bytes after grid payload", src.Len())
+	if err := checkPayloadEnd(lr, src); err != nil {
+		return nil, err
 	}
 
-	g, err := NewGrid(model, runTime, validTime, lat0, lon0, dLat, dLon, int(ni), int(nj))
+	g, err := NewGrid(gh.model, gh.runTime, gh.validTime, gh.lat0, gh.lon0, gh.dLat, gh.dLon, gh.ni, gh.nj)
 	if err != nil {
 		return nil, err
 	}
@@ -225,6 +238,91 @@ func Decode(b []byte) (*Grid, error) {
 	off = getI16s(raw, off, g.G)
 	getI16s(raw, off, g.N)
 	return g, nil
+}
+
+// checkPayloadEnd verifies that lr (a reader limited to the expected size
+// plus one byte) is at EOF and that the DEFLATE stream consumed all of src.
+func checkPayloadEnd(lr io.Reader, src *bytes.Reader) error {
+	var extra [1]byte
+	switch _, err := io.ReadFull(lr, extra[:]); {
+	case err == nil:
+		return errors.New("ducting: grid payload inflates past ni*nj*13 bytes")
+	case err != io.EOF:
+		return fmt.Errorf("ducting: grid payload: %w", err)
+	}
+	// bytes.Reader is an io.ByteReader, so flate reads it byte by byte
+	// without read-ahead: whatever is left is not part of the stream.
+	if src.Len() != 0 {
+		return fmt.Errorf("ducting: %d bytes after grid payload", src.Len())
+	}
+	return nil
+}
+
+// Decoder decodes only the planes PathStats reads (C and F) and reuses its
+// buffers between calls, for scans that walk many stored steps one at a time
+// (the long-link analysis): Decode allocates the 13-byte-per-point inflate
+// buffer and seven plane slices per call, ~3.5 MB for a 0.5° world grid.
+// The zero value is ready. Not safe for concurrent use.
+type Decoder struct {
+	g   Grid
+	fr  io.ReadCloser
+	src bytes.Reader
+	f   []byte
+}
+
+// DecodePlanes validates b exactly as Decode does (header, inflated size,
+// trailing bytes, class range) but fills only the header fields and the C and
+// F planes of the returned grid; B, T, DM, G and N are nil, so only Nearest,
+// LatLon and PathStats (and CarriesLoRa on C/F) are meaningful. The grid and
+// its slices are owned by d and valid until the next DecodePlanes call.
+func (d *Decoder) DecodePlanes(b []byte) (*Grid, error) {
+	gh, err := parseHeader(b)
+	if err != nil {
+		return nil, err
+	}
+	n := gh.ni * gh.nj
+	expected := int64(n) * GridBytesPerPoint
+	d.src.Reset(gh.payload)
+	if d.fr == nil {
+		d.fr = flate.NewReader(&d.src)
+	} else if err := d.fr.(flate.Resetter).Reset(&d.src, nil); err != nil {
+		return nil, fmt.Errorf("ducting: grid payload: %w", err)
+	}
+	lr := io.LimitReader(d.fr, expected+1)
+	d.g.C = slices.Grow(d.g.C[:0], n)[:n]
+	if _, err := io.ReadFull(lr, d.g.C); err != nil {
+		return nil, fmt.Errorf("ducting: grid payload: %w", err)
+	}
+	for _, c := range d.g.C {
+		if c > ClassSurface {
+			return nil, fmt.Errorf("ducting: grid class %d out of range", c)
+		}
+	}
+	d.f = slices.Grow(d.f[:0], 2*n)[:2*n]
+	if _, err := io.ReadFull(lr, d.f); err != nil {
+		return nil, fmt.Errorf("ducting: grid payload: %w", err)
+	}
+	d.g.F = slices.Grow(d.g.F[:0], n)[:n]
+	getU16s(d.f, 0, d.g.F)
+	// The other planes are not needed: skip them, still checking the size.
+	rest := expected - int64(3*n)
+	got, err := io.Copy(io.Discard, lr)
+	if err != nil {
+		return nil, fmt.Errorf("ducting: grid payload: %w", err)
+	}
+	switch {
+	case got < rest:
+		return nil, fmt.Errorf("ducting: grid payload: %w", io.ErrUnexpectedEOF)
+	case got > rest:
+		return nil, errors.New("ducting: grid payload inflates past ni*nj*13 bytes")
+	}
+	if d.src.Len() != 0 {
+		return nil, fmt.Errorf("ducting: %d bytes after grid payload", d.src.Len())
+	}
+	d.g.Model, d.g.RunTime, d.g.ValidTime = gh.model, gh.runTime, gh.validTime
+	d.g.Lat0, d.g.Lon0, d.g.DLat, d.g.DLon = gh.lat0, gh.lon0, gh.dLat, gh.dLon
+	d.g.Ni, d.g.Nj = gh.ni, gh.nj
+	return &d.g, nil
 }
 
 func putU16s(dst []byte, off int, src []uint16) int {

@@ -63,6 +63,12 @@ type ductingStepSource interface {
 	Load(validTime int64) (*ducting.Grid, error)
 }
 
+// ductingPlaneLoader is an optional ductingStepSource capability: Load that
+// decodes only the C and F planes into a caller-owned, reusable Decoder.
+type ductingPlaneLoader interface {
+	LoadPlanes(validTime int64, d *ducting.Decoder) (*ducting.Grid, error)
+}
+
 // DuctingMetaResponse is GET /api/ducting/meta.
 type DuctingMetaResponse struct {
 	Status        string  `json:"status"` // "ok" | "pending" (no rows yet) | "error"

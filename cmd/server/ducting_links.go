@@ -19,7 +19,8 @@ package main
 // Cost: the candidate observations are copied under the store's read lock
 // (only the fields needed), then all grid work runs without it. Each stored
 // step is decoded at most once per rebuild through ductingStepSource.Load
-// (never the LRU behind Step), one at a time. Answers are cached per days
+// (or LoadPlanes, which decodes only the planes sampled; never the LRU behind
+// Step), one at a time. Answers are cached per days
 // for ductingLinksCacheTTL, concurrent requests share one rebuild, rebuilds
 // run one at a time, and per-reception results are memoised across rebuilds
 // in a bounded FIFO.
@@ -293,9 +294,20 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 	}
 	sort.Ints(steps)
 
+	// Steps are visited one at a time and only sampled along paths, so a
+	// source that can decode just the C and F planes into one reused buffer
+	// does (3.4 MB and seven planes less garbage per step).
+	var dec ducting.Decoder
+	planes, _ := src.(ductingPlaneLoader)
 	combos, ducted := 0, 0
 	for _, row := range steps {
-		g, err := src.Load(rows[row].ValidTime)
+		var g *ducting.Grid
+		var err error
+		if planes != nil {
+			g, err = planes.LoadPlanes(rows[row].ValidTime, &dec)
+		} else {
+			g, err = src.Load(rows[row].ValidTime)
+		}
 		if err == nil && g == nil {
 			err = errors.New("no grid")
 		}
@@ -324,7 +336,7 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 				}
 			}
 		}
-		// g goes out of scope here: at most one decoded step is held.
+		// g goes out of scope here (or is reused by dec): at most one step is held.
 	}
 	if combos > 0 {
 		resp.Summary.BaselineDuctFrac = float64(ducted) / float64(combos)
@@ -430,47 +442,81 @@ func (s *Server) ductingLinkEnds(nodes []nodeInfo) (map[string]DuctingLinkEnd, e
 	return ends, nil
 }
 
+// ductingScanChunk is how many ADVERTs ductingLinkReceptions scans per hold
+// of the store's read lock: ~0.5 ms in the worst case (every observation a
+// reception), so a queued ingest writer never waits for a whole-store scan.
+const ductingScanChunk = 256
+
 // ductingLinkReceptions copies the certain zero-hop advert receptions in
-// [from, to] whose two ends are both in ends. Holds the read lock only for
-// the copy.
+// [from, to] whose two ends are both in ends. The read lock is held for at
+// most ductingScanChunk adverts at a time. A concurrent eviction compacts the
+// ADVERT list in place between chunks; the scan then resumes after the last
+// advert it saw, or, if that one was evicted, at the same index (which may
+// skip a few adverts). Eviction lowers totalObs, which changes the cache key
+// of ductingLinksState, so the next request rebuilds from a settled store.
 func (s *PacketStore) ductingLinkReceptions(ends map[string]DuctingLinkEnd, cfg *Config, from, to int64) []ductingLinkObs {
 	var out []ductingLinkObs
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, tx := range s.byPayloadType[PayloadADVERT] {
-		sigChecked := false
-		for _, obs := range tx.Observations {
-			if obs.isOwnTransmission() || lastPathHop(obs.PathJSON) != "" {
-				continue
-			}
-			b := strings.ToLower(obs.ObserverID)
-			if _, ok := ends[b]; !ok || cfg.IsObserverBlacklisted(obs.ObserverID) {
-				continue
-			}
-			ts, ok := obs.ParsedTime()
-			if !ok || ts.Unix() < from || ts.Unix() > to {
-				continue
-			}
-			// Empty path, so directHeardNode resolves only its zero-hop
-			// case (the advert's own pubkey); no prefix map is consulted.
-			a := directHeardNode(tx, obs, nil)
-			if a == "" || a == b {
-				continue
-			}
-			if _, ok := ends[a]; !ok {
-				continue
-			}
-			if !sigChecked {
-				if tx.signatureFailed() {
+	var last *StoreTx
+	for pos := 0; ; {
+		s.mu.RLock()
+		list := s.byPayloadType[PayloadADVERT]
+		if last != nil && (pos > len(list) || list[pos-1] != last) {
+			for i, tx := range list { // moved by an eviction: find where we were
+				if tx == last {
+					pos = i + 1
 					break
 				}
-				sigChecked = true
 			}
-			out = append(out, ductingLinkObs{
-				obsID: obs.ID, t: ts.Unix(), a: a, b: b,
-				snr: copyFloatPtr(obs.SNR), rssi: copyFloatPtr(obs.RSSI),
-			})
 		}
+		if pos >= len(list) {
+			s.mu.RUnlock()
+			return out
+		}
+		end := min(pos+ductingScanChunk, len(list))
+		for _, tx := range list[pos:end] {
+			out = ductingAdvertReceptions(out, tx, ends, cfg, from, to)
+		}
+		last = list[end-1]
+		pos = end
+		s.mu.RUnlock()
+	}
+}
+
+// ductingAdvertReceptions appends tx's qualifying receptions to out. The
+// caller holds the store's read lock.
+func ductingAdvertReceptions(out []ductingLinkObs, tx *StoreTx, ends map[string]DuctingLinkEnd, cfg *Config, from, to int64) []ductingLinkObs {
+	sigChecked := false
+	for _, obs := range tx.Observations {
+		if obs.isOwnTransmission() || lastPathHop(obs.PathJSON) != "" {
+			continue
+		}
+		b := strings.ToLower(obs.ObserverID)
+		if _, ok := ends[b]; !ok || cfg.IsObserverBlacklisted(obs.ObserverID) {
+			continue
+		}
+		ts, ok := obs.ParsedTime()
+		if !ok || ts.Unix() < from || ts.Unix() > to {
+			continue
+		}
+		// Empty path, so directHeardNode resolves only its zero-hop
+		// case (the advert's own pubkey); no prefix map is consulted.
+		a := directHeardNode(tx, obs, nil)
+		if a == "" || a == b {
+			continue
+		}
+		if _, ok := ends[a]; !ok {
+			continue
+		}
+		if !sigChecked {
+			if tx.signatureFailed() {
+				break
+			}
+			sigChecked = true
+		}
+		out = append(out, ductingLinkObs{
+			obsID: obs.ID, t: ts.Unix(), a: a, b: b,
+			snr: copyFloatPtr(obs.SNR), rssi: copyFloatPtr(obs.RSSI),
+		})
 	}
 	return out
 }

@@ -752,6 +752,18 @@ func BenchmarkDuctingGridHandler(b *testing.B) {
 			}
 			b.ReportMetric(float64(rec.Body.Len()), "body-bytes")
 		})
+		// A revalidation (If-None-Match) skips the body encode entirely.
+		b.Run(bc.name+"-304", func(b *testing.B) {
+			etag := ductingGridGet(f.svc, "t=3600&bbox="+bc.bbox).Header().Get("ETag")
+			if rec := ductingGridGet(f.svc, "t=3600&bbox="+bc.bbox, "If-None-Match", etag); rec.Code != 304 {
+				b.Fatalf("%d", rec.Code)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				ductingGridGet(f.svc, "t=3600&bbox="+bc.bbox, "If-None-Match", etag)
+			}
+		})
 	}
 	if f.decodes.Load() != 1 {
 		b.Fatalf("benchmark decoded %d times", f.decodes.Load())
