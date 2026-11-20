@@ -923,8 +923,12 @@
     var out = [];
     if (!rec) out.push(period + ': no receptions between node pairs ' + losPhrase(method) + '.');
     else {
-      out.push(period + ': ' + fmtInt(rec) + ' reception' + (rec === 1 ? '' : 's') + ' on ' + fmtInt(pairs) + ' node pair' +
-        (pairs === 1 ? '' : 's') + ' ' + losPhrase(method) + '.');
+      // The analysis lists at most listedPairs (the longest); when that is
+      // fewer than all pairs, the sentence names those instead of the total.
+      var listed = int0(sum.listedPairs);
+      var on = (listed && listed < pairs) ? 'the ' + fmtInt(listed) + ' longest node pair' + (listed === 1 ? '' : 's')
+        : fmtInt(pairs) + ' node pair' + (pairs === 1 ? '' : 's');
+      out.push(period + ': ' + fmtInt(rec) + ' reception' + (rec === 1 ? '' : 's') + ' on ' + on + ' ' + losPhrase(method) + '.');
       var g = num(sum.recvMeanGradNkm), gb = num(sum.baselineMeanGradNkm);
       var e = frac(sum.recvEnhancedFrac), eb = frac(sum.baselineEnhancedFrac);
       var grad = g == null ? '' : 'Along their paths the modelled refractivity gradient averaged ' + fmtGrad(g) + ' when heard' +
@@ -1887,7 +1891,12 @@
         if (typeof AbortController === 'function') ctrl = new AbortController();
         this._winAbort = ctrl;
         this._winFetchKey = want.key;
-        var url = GRID_URL + '?t=' + encodeURIComponent(String(want.t)) + '&bbox=' + [b.s, b.w, b.n, b.e].join(',');
+        // run: the model run the times come from. The server ignores it; it
+        // only makes the URL change per run, so the HTTP cache (max-age 600)
+        // never serves a window of the previous run after a new one lands.
+        var run = this._meta && num(this._meta.runTime);
+        var url = GRID_URL + '?t=' + encodeURIComponent(String(want.t)) + '&bbox=' + [b.s, b.w, b.n, b.e].join(',') +
+          (run != null ? '&run=' + encodeURIComponent(String(run)) : '');
         var done = function () {
           if (self._winFetchKey === want.key) { self._winFetchKey = ''; self._winAbort = null; }
         };

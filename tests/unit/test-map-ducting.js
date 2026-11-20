@@ -1775,6 +1775,13 @@ test('grid: MC_ductLinksSummary leads with the gradient comparison; says only wh
   assert.strictEqual(f({ recvMeanGradNkm: null, recvEnhancedFrac: null, baselineEnhancedFrac: -1 }), LEAD, 'nothing to compare');
   assert.strictEqual(f({ recvMeanGradNkm: undefined, recvEnhancedFrac: undefined }), LEAD, 'fields missing (older server)');
   assert.strictEqual(f({ links: 1, receptions: 1 }, 1).slice(0, 72), 'Last 24 hours: 1 reception on 1 node pair without terrain line of sight.');
+  const lead50 = LEAD.replace('56 node pairs', 'the 50 longest node pairs');
+  assert.strictEqual(f({ listedPairs: 50 }).slice(0, lead50.length), lead50,
+    'fewer listed than all pairs: the longest ones are named');
+  assert.ok(f({ listedPairs: 56 }).indexOf(LEAD) === 0, 'all listed: the total');
+  assert.ok(f({ listedPairs: 500 }).indexOf(LEAD) === 0, 'cap above the total: the total');
+  assert.ok(f({ listedPairs: null }).indexOf(LEAD) === 0 && f({ listedPairs: 0 }).indexOf(LEAD) === 0, 'absent or 0: the total');
+  assert.ok(f({ links: 900, listedPairs: 1 }).indexOf('on the 1 longest node pair without') > 0);
   assert.strictEqual(f({ links: 0, receptions: 0, unverifiedPairs: 2 }, 3),
     'Last 3 days: no receptions between node pairs without terrain line of sight. 2 more pairs not checked yet.');
   assert.strictEqual(f({ recvMeanGradNkm: 12.4, baselineMeanGradNkm: 0 }).indexOf('averaged 12 N/km when heard, against 0 N/km') > 0, true, 'positive and zero plain');
@@ -1857,7 +1864,7 @@ test('grid: the window for view + time is fetched once after the debounce, bbox 
   s.map.fire('moveend'); s.map.fire('zoomend');
   assert.strictEqual(s.timeouts.length, 1, 'rapid events coalesce');
   s.flush();
-  assert.deepStrictEqual(callsTo(s, '/api/ducting/grid').map(c => c.url), ['/api/ducting/grid?t=' + GT + '&bbox=' + BASE_BBOX]);
+  assert.deepStrictEqual(callsTo(s, '/api/ducting/grid').map(c => c.url), ['/api/ducting/grid?t=' + GT + '&bbox=' + BASE_BBOX + '&run=' + GMETA.runTime]);
   lastCall(s, '/api/ducting/grid').ok(clone(GWIN));
   await settle();
   assert.ok(s.layer._field && s.map._layers.indexOf(s.layer._field) >= 0, 'field drawn');
@@ -1899,7 +1906,7 @@ test('grid: panning inside the drawn window fetches nothing; leaving it fetches 
   s.map.move({ s: 40, w: 10, n: 42, e: 12 });
   s.flush();
   assert.strictEqual(callsTo(s, '/api/ducting/grid').length, n0 + 1);
-  assert.strictEqual(lastCall(s, '/api/ducting/grid').url, '/api/ducting/grid?t=' + GT + '&bbox=39,9,43,13');
+  assert.strictEqual(lastCall(s, '/api/ducting/grid').url, '/api/ducting/grid?t=' + GT + '&bbox=39,9,43,13' + '&run=' + GMETA.runTime);
   // Zooming far out inside the drawn box changes the step: refetch.
   const s2 = await mountGrid({ view: { s: 30, w: -30, n: 60, e: 30 } });
   const before = callsTo(s2, '/api/ducting/grid').length;
@@ -1914,7 +1921,7 @@ test('grid: the drawn image stays while a new window loads; superseded requests 
   slide(s, 9);
   s.flush();
   const a = lastCall(s, '/api/ducting/grid');
-  assert.strictEqual(a.url, '/api/ducting/grid?t=' + GMETA.times[9] + '&bbox=' + BASE_BBOX, 'the drawn box is reused for a new time');
+  assert.strictEqual(a.url, '/api/ducting/grid?t=' + GMETA.times[9] + '&bbox=' + BASE_BBOX + '&run=' + GMETA.runTime, 'the drawn box is reused for a new time');
   assert.ok(s.map._layers.indexOf(field) >= 0 && s.layer._data === data, 'old image kept while loading');
   slide(s, 10);
   s.flush();
@@ -1964,6 +1971,9 @@ test('grid: a new model run empties the cache and refetches the shown window, ke
   assert.ok(s.map._layers.indexOf(field) >= 0);
   s.flush();
   assert.strictEqual(callsTo(s, '/api/ducting/grid').length, n + 1);
+  assert.strictEqual(lastCall(s, '/api/ducting/grid').url, '/api/ducting/grid?t=' + GT + '&bbox=' + BASE_BBOX + '&run=' + m.runTime,
+    'a new URL per run: the HTTP cache cannot answer with the old run');
+  assert.notStrictEqual(m.runTime, GMETA.runTime);
 });
 
 test('grid: a user-picked time is kept across meta refreshes while stored, else back to the default', async () => {
@@ -2161,7 +2171,7 @@ test('grid: a failed window keeps the previous image and says so; the next succe
 
 test('grid: a view on another world copy draws the window, LoRa outline and links shifted onto it', async () => {
   const s = await mountGrid({ view: { s: 51, w: 359, n: 53, e: 361 } });
-  assert.strictEqual(lastCall(s, '/api/ducting/grid').url, '/api/ducting/grid?t=' + GT + '&bbox=' + BASE_BBOX);
+  assert.strictEqual(lastCall(s, '/api/ducting/grid').url, '/api/ducting/grid?t=' + GT + '&bbox=' + BASE_BBOX + '&run=' + GMETA.runTime);
   assert.strictEqual(s.layer._grid.west, 359);
   const ring = loraLayer(s).latlngs[0][0];
   assert.deepStrictEqual(JSON.parse(JSON.stringify(ring[0])), [52, 360]);
