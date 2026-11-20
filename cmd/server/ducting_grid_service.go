@@ -395,8 +395,8 @@ func (s *ductingGridService) serveMeta(w http.ResponseWriter, r *http.Request) {
 // latitudes clamped to [-90, 90] with s < n; a box of 360° or more of
 // longitude becomes [-180, 180], otherwise w is shifted into [-180, 180)
 // and e by the same multiple of 360, then e is clipped to 180. So a box
-// that crosses the antimeridian shows only its western part (the browser
-// asks for the rest separately if it wants it). Every edge is then rounded
+// that crosses the antimeridian shows only its western part, a documented
+// limitation: nothing asks for the eastern part. Every edge is then rounded
 // to 0.01°, so the ETag (which names the rounded box) identifies the
 // answer exactly; a box that collapses under rounding is refused.
 func ductingGridBBox(v string) (box [4]float64, err error) {

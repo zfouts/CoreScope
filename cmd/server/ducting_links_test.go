@@ -343,7 +343,8 @@ func TestDuctingLinksPairCapAndOrder(t *testing.T) {
 		in.Recv = append(in.Recv, linksRecv(i, linksNow.Unix()-3600, lpA, pk))
 	}
 	resp := mustBuild(t, in, src)
-	if resp.Summary.Links != n || resp.Summary.Receptions != n || len(resp.Links) != ductingLinksMaxPairs {
+	if resp.Summary.Links != n || resp.Summary.ListedPairs != ductingLinksMaxPairs || len(resp.Links) != ductingLinksMaxPairs ||
+		resp.Summary.Receptions != ductingLinksMaxPairs {
 		t.Fatalf("summary %+v, listed %d", resp.Summary, len(resp.Links))
 	}
 	for i := 1; i < len(resp.Links); i++ {
@@ -361,30 +362,110 @@ func TestDuctingLinksPairCapAndOrder(t *testing.T) {
 	}
 }
 
-func TestDuctingLinksReceptionCapNewestFirst(t *testing.T) {
+// Every statistic is over the listed pairs: receptions of pairs past the
+// cap (here all of them during a duct) count nowhere, so the receptions and
+// the baseline describe the same paths.
+func TestDuctingLinksStatsOverListedPairs(t *testing.T) {
+	t1, t2 := linksNow.Unix()-2*3600, linksNow.Unix()-3600
 	src := newLinksFakeSrc()
-	src.add(linksGrid(t, 0, linksNow.Unix()-3600, linksAll(linksNormal)))
+	src.add(linksGrid(t, 0, t1, linksAll(linksDuct)))
+	src.add(linksGrid(t, 0, t2, linksAll(linksNormal)))
+	in := linksIn(linksEnd(lpA, 50, 0, 5))
+	n := ductingLinksMaxPairs + 5
+	for i := 0; i < n; i++ {
+		pk := linksPK(1000 + i)
+		in.Ends[pk] = linksEnd(pk, 50, 0.5+float64(i)*0.01, 5)
+		at := t2 // listed (longer) pairs: heard without a duct
+		if i < 5 {
+			at = t1 // the 5 shortest, past the cap: heard during a duct
+		}
+		in.Recv = append(in.Recv, linksRecv(i, at, lpA, pk))
+	}
+	s := mustBuild(t, in, src).Summary
+	if s.Links != n || s.ListedPairs != ductingLinksMaxPairs || s.Receptions != ductingLinksMaxPairs || s.WithGrid != ductingLinksMaxPairs {
+		t.Fatalf("summary %+v", s)
+	}
+	if s.DuringDuct != 0 || s.RecvEnhancedFrac != 0 {
+		t.Errorf("unlisted pairs counted: %+v", s)
+	}
+	if s.BaselineDuctFrac != 0.5 { // listed pairs x (t1 ducted, t2 not)
+		t.Errorf("baseline = %v", s.BaselineDuctFrac)
+	}
+}
+
+// Receptions are thinned by time: the newest per stored step (per 3 h UTC
+// bucket where no step is near), across the whole period, newest first;
+// Count is every reception.
+func TestDuctingLinksReceptionsThinnedByTime(t *testing.T) {
+	src := newLinksFakeSrc()
+	var steps []int64
+	for j := 0; j < 54; j++ { // every 3 h from 7 days ago to 9 h ago
+		vt := linksNow.Unix() - 7*86400 + int64(j)*3*3600
+		steps = append(steps, vt)
+		src.add(linksGrid(t, 0, vt, linksAll(linksNormal)))
+	}
 	in := linksIn(linksEnd(lpA, 50, 0, 5), linksEnd(lpB, 50, 3, 5))
+	in.HistoryDays = 7
 	snr, rssi := -7.5, -110.0
-	for i := 0; i < 60; i++ {
-		r := linksRecv(i, linksNow.Unix()-int64(i/2)*60, lpA, lpB) // pairs share a time
+	var all []int64
+	for k := 0; ; k++ { // every 20 min over the last 6 days
+		at := linksNow.Unix() - int64(k)*20*60
+		if at < linksNow.Unix()-6*86400 {
+			break
+		}
+		r := linksRecv(k, at, lpA, lpB)
 		r.snr, r.rssi = &snr, &rssi
 		in.Recv = append(in.Recv, r)
+		all = append(all, at)
 	}
+	// The expected buckets, worked out independently.
+	bucketOf := func(at int64) int64 {
+		best, bestD := int64(-1), int64(ductingLinksStepWindowS)+1
+		for _, vt := range steps {
+			d := vt - at
+			if d < 0 {
+				d = -d
+			}
+			if d < bestD {
+				best, bestD = vt, d
+			}
+		}
+		if best >= 0 {
+			return best
+		}
+		return at - at%(3*3600)
+	}
+	newest := map[int64]int64{}
+	for _, at := range all {
+		if b := bucketOf(at); at > newest[b] {
+			newest[b] = at
+		}
+	}
+
 	l := mustBuild(t, in, src).Links[0]
-	if l.Count != 60 || len(l.Receptions) != ductingLinksMaxRecv {
-		t.Fatalf("count %d listed %d", l.Count, len(l.Receptions))
+	if l.Count != len(all) || len(l.Receptions) != len(newest) || len(newest) < 48 {
+		t.Fatalf("count %d (want %d), listed %d (want %d buckets)", l.Count, len(all), len(l.Receptions), len(newest))
 	}
-	if l.Receptions[0].T != linksNow.Unix() || l.Receptions[49].T != linksNow.Unix()-24*60 {
-		t.Errorf("order: first %d last %d", l.Receptions[0].T, l.Receptions[49].T)
-	}
-	for i := 1; i < len(l.Receptions); i++ {
-		if l.Receptions[i].T > l.Receptions[i-1].T {
+	for i, r := range l.Receptions {
+		if newest[bucketOf(r.T)] != r.T {
+			t.Errorf("reception %d at %d is not its bucket's newest", i, r.T)
+		}
+		if i > 0 && r.T >= l.Receptions[i-1].T {
 			t.Fatalf("not newest first at %d", i)
 		}
 	}
+	if oldest := l.Receptions[len(l.Receptions)-1].T; oldest > linksNow.Unix()-6*86400+3*3600 {
+		t.Errorf("oldest listed %d: the start of the period is lost", oldest)
+	}
 	if l.Receptions[0].SNR == nil || *l.Receptions[0].SNR != snr || *l.Receptions[0].RSSI != rssi {
 		t.Errorf("signal = %+v", l.Receptions[0])
+	}
+
+	// The cap: ductingLinksRecvPerDay per day of history, newest first.
+	in.HistoryDays, in.Days = 1, 1
+	l = mustBuild(t, in, src).Links[0]
+	if len(l.Receptions) != ductingLinksRecvPerDay || l.Receptions[0].T != linksNow.Unix() {
+		t.Errorf("capped: %d receptions, first %d", len(l.Receptions), l.Receptions[0].T)
 	}
 }
 
@@ -771,13 +852,16 @@ func TestDuctingLinksCacheAndSingleflight(t *testing.T) {
 	if gathers != 3 {
 		t.Errorf("new run did not rebuild")
 	}
-	// Past the TTL: rebuilt. The memo spares the path work, not the baseline loads.
+	// Past the TTL: the stale answer is served at once and one background
+	// rebuild replaces it. The memo spares the path work, not the baseline
+	// loads.
 	mu.Lock()
 	clock = clock.Add(ductingLinksCacheTTL * time.Second)
 	mu.Unlock()
 	before := src.loadCount()
-	linksGet(st, srv, src, "", 7)
-	if gathers != 4 || src.loadCount() == before {
+	stale := linksGet(st, srv, src, "", 7).Body.String()
+	st.bg.Wait()
+	if gathers != 4 || src.loadCount() == before || stale == "" {
 		t.Errorf("expired: gathers %d loads %d->%d", gathers, before, src.loadCount())
 	}
 	if st.memo.len() == 0 {
@@ -785,31 +869,123 @@ func TestDuctingLinksCacheAndSingleflight(t *testing.T) {
 	}
 }
 
-func TestDuctingLinksCacheKeyStoreGeneration(t *testing.T) {
+// On a live mesh observations arrive every few seconds: they must not make
+// every request rebuild. The cached answer is reused while it is fresh;
+// once stale it is still served at once, and exactly one background rebuild
+// (however many requests arrive meanwhile) brings the new observations in.
+// A visibility change is a new key: never served from the old answer.
+func TestDuctingLinksCacheReuseDuringIngest(t *testing.T) {
 	adv, obs := linksPK(0x41), linksPK(0x42)
 	at := linksNow.Add(-time.Hour)
 	srv := linksServer(&Config{}, []nodeInfo{linksNode(adv, "a", 50, 0), linksNode(obs, "b", 50, 3)},
 		linksAdvert(1, RouteFlood, adv, "", linksObs(10, obs, "[]", at)))
 	src := newLinksFakeSrc()
 	src.add(linksGrid(t, 0, at.Unix(), linksAll(linksNormal)))
+	var mu sync.Mutex
+	clock := linksNow
+	builds := 0
 	st := newDuctingLinksState()
-	st.now = func() time.Time { return linksNow }
-	if r := linksDecode(t, linksGet(st, srv, src, "", 7)); r.Summary.Receptions != 1 {
-		t.Fatalf("first = %+v", r.Summary)
+	st.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	st.gather = func(s *Server, days int, now time.Time) (ductingLinksInput, error) {
+		mu.Lock()
+		builds++
+		mu.Unlock()
+		return s.ductingLinksInputFor(days, now)
 	}
-	// A new observation raises maxObsID: the cached answer is not reused.
-	tx := srv.store.byPayloadType[PayloadADVERT][0]
-	srv.store.mu.Lock()
-	tx.Observations = append(tx.Observations, linksObs(11, obs, "[]", at.Add(time.Minute)))
-	srv.store.maxObsID, srv.store.totalObs = 11, 2
-	srv.store.mu.Unlock()
-	if r := linksDecode(t, linksGet(st, srv, src, "", 7)); r.Summary.Receptions != 2 {
-		t.Errorf("after new observation = %+v", r.Summary)
+	ingest := func(id int) {
+		tx := srv.store.byPayloadType[PayloadADVERT][0]
+		srv.store.mu.Lock()
+		tx.Observations = append(tx.Observations, linksObs(id, obs, "[]", at.Add(time.Duration(id)*time.Second)))
+		srv.store.maxObsID, srv.store.totalObs = id, srv.store.totalObs+1
+		srv.store.mu.Unlock()
 	}
-	// A visibility rule change too.
+	advance := func(d time.Duration) { mu.Lock(); clock = clock.Add(d); mu.Unlock() }
+	recv := func() int { return linksDecode(t, linksGet(st, srv, src, "", 7)).Summary.Receptions }
+
+	if r := recv(); r != 1 || builds != 1 {
+		t.Fatalf("first: receptions %d builds %d", r, builds)
+	}
+	// Ingest between requests, within the TTL: reused, no rebuild.
+	for id := 11; id < 20; id++ {
+		ingest(id)
+		advance(10 * time.Second)
+		if r := recv(); r != 1 {
+			t.Fatalf("fresh answer not reused: receptions %d", r)
+		}
+	}
+	if builds != 1 {
+		t.Fatalf("builds during ingest = %d, want 1", builds)
+	}
+	// Stale: many requests get the old answer at once; one rebuild runs.
+	advance(ductingLinksCacheTTL * time.Second)
+	for i := 0; i < 5; i++ {
+		if r := recv(); r != 1 && r != 10 {
+			t.Fatalf("stale request: receptions %d", r)
+		}
+	}
+	st.bg.Wait()
+	if builds != 2 {
+		t.Fatalf("background rebuilds = %d, want 1", builds-1)
+	}
+	if r := recv(); r != 10 {
+		t.Errorf("after the refresh: receptions %d, want 10", r)
+	}
+	// A visibility rule change is a new key: rebuilt before answering.
 	srv.cfg.SetNodeBlacklist([]string{adv})
-	if r := linksDecode(t, linksGet(st, srv, src, "", 7)); r.Summary.Receptions != 0 {
-		t.Errorf("after blacklisting = %+v", r.Summary)
+	if r := recv(); r != 0 || builds != 3 {
+		t.Errorf("after blacklisting: receptions %d builds %d", r, builds)
+	}
+}
+
+// Only requests that start a build are charged: a first build that would
+// exceed the client's budget answers 429 with Retry-After; cached answers,
+// requests joining a running build and pending answers are free; a spent
+// budget serves a stale answer without refreshing it.
+func TestDuctingLinksBuildLimiter(t *testing.T) {
+	src := newLinksFakeSrc()
+	srv := &Server{cfg: &Config{}}
+	st := newDuctingLinksState()
+	var mu sync.Mutex
+	clock := linksNow
+	st.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	st.limit = &clientLimiter{ipr: &wsLimiter{}, rl: newRateLimiter(2, time.Hour), tag: "t", what: "w"}
+	st.gather = func(*Server, int, time.Time) (ductingLinksInput, error) { return linksIn(), nil }
+
+	// Pending (no rows): free.
+	for i := 0; i < 5; i++ {
+		if w := linksGet(st, srv, src, "", 7); w.Code != 200 {
+			t.Fatalf("pending charged: %d", w.Code)
+		}
+	}
+	src.add(linksGrid(t, 0, linksNow.Unix()-3600, linksAll(linksNormal)))
+	for _, q := range []string{"", "?days=3"} { // two first builds: the budget
+		if w := linksGet(st, srv, src, q, 7); w.Code != 200 {
+			t.Fatalf("%q: %d", q, w.Code)
+		}
+	}
+	for i := 0; i < 3; i++ { // cached: free
+		if w := linksGet(st, srv, src, "", 7); w.Code != 200 {
+			t.Fatalf("cached answer charged: %d", w.Code)
+		}
+	}
+	w := linksGet(st, srv, src, "?days=2", 7) // a third build: refused
+	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("over budget: %d %v", w.Code, w.Header())
+	}
+	// Stale with the budget spent: served, not refreshed.
+	mu.Lock()
+	clock = clock.Add(ductingLinksCacheTTL * time.Second)
+	mu.Unlock()
+	if w := linksGet(st, srv, src, "", 7); w.Code != 200 {
+		t.Fatalf("stale answer refused: %d", w.Code)
+	}
+	st.bg.Wait()
+	k, err := st.key(srv, src, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, fresh := st.lookup(k, st.now()); b == nil || fresh {
+		t.Errorf("stale entry refreshed without budget (found %v, fresh %v)", b != nil, fresh)
 	}
 }
 

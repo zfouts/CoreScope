@@ -193,7 +193,9 @@ func TestDuctingLinksRelayDedupPerTransmission(t *testing.T) {
 // an observer and a relay reception with the same numeric id apart.
 func TestDuctingLinksRelayInResponse(t *testing.T) {
 	at := linksNow.Add(-time.Hour)
-	observer := relayObs(1, rR2, `[]`, at) // R2 is an observer node and heard R1 directly
+	// R2 is an observer node and heard R1 directly, one grid step earlier
+	// (receptions are listed one per step).
+	observer := relayObs(1, rR2, `[]`, at.Add(-3*time.Hour))
 	observer.relayHopHexLen = 0
 	srv := linksServer(&Config{}, relayNodes(),
 		relayAdvert(5, rR1, "", observer),
@@ -201,6 +203,7 @@ func TestDuctingLinksRelayInResponse(t *testing.T) {
 	)
 	src := newLinksFakeSrc()
 	src.add(linksGrid(t, 0, at.Unix(), linksAll(linksDuct)))
+	src.add(linksGrid(t, 0, at.Add(-3*time.Hour).Unix(), linksAll(linksDuct)))
 	st := newDuctingLinksState()
 	st.now = func() time.Time { return linksNow }
 	w := linksGet(st, srv, src, "", 7)

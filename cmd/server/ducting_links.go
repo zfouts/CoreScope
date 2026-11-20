@@ -84,6 +84,9 @@ type ductingLinksInput struct {
 	FreqMHz float64
 	Days    int
 	Memo    *ductingLinksMemo // nil: no memo
+	// HistoryDays is the stored history; it sizes the receptions listed per
+	// pair (ductingLinksRecvPerDay a day). 0: Days.
+	HistoryDays int
 
 	// Terrain is the line-of-sight terrain; nil: smooth-earth rule (antenna
 	// heights only, k = 4/3). KFactor is the resolved los.kFactor. LOS keeps
@@ -520,18 +523,23 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 	if len(listed) > ductingLinksMaxPairs {
 		listed = listed[:ductingLinksMaxPairs]
 	}
+	// Every statistic below is over the listed pairs only, so the receptions
+	// and the baseline describe the same paths.
+	resp.Summary.ListedPairs = len(listed)
 
 	// Per-reception step, from the memo where possible; the rest are grouped
 	// by the row they need.
 	metric := make([]ductingPathMetric, len(in.Recv))
 	pairOf := make([]*ductingLinkPair, len(in.Recv))
+	rowOf := make([]int, len(in.Recv))
 	need := make(map[int][]int) // row index -> receptions still to compute
-	for _, p := range pairs {
+	for _, p := range listed {
 		for _, i := range p.recv {
 			resp.Summary.Receptions++
 			metric[i] = ductingNoMetric
 			pairOf[i] = p
 			row := ductingNearestRow(rows, in.Recv[i].t)
+			rowOf[i] = row
 			if row < 0 {
 				continue
 			}
@@ -603,7 +611,7 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 	resp.Summary.BaselineMeanGradNkm = base.meanN()
 
 	var recv ductingTally
-	for _, p := range pairs {
+	for _, p := range listed {
 		for _, i := range p.recv {
 			recv.add(metric[i])
 		}
@@ -613,6 +621,17 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 	resp.Summary.RecvEnhancedFrac = recv.frac(recv.enh)
 	resp.Summary.RecvMeanGradNkm = recv.meanN()
 
+	// Receptions listed per pair: thinned by time, not by count, so a busy
+	// pair still has receptions across the whole period when the map's time
+	// slider moves back. Newest first, the newest in each bucket: the stored
+	// step the reception maps to, or for one without a step its
+	// ductingLinksRecvBucketS UTC bucket; at most ductingLinksRecvPerDay per
+	// day of history.
+	maxRecv := in.HistoryDays
+	if maxRecv < in.Days {
+		maxRecv = in.Days
+	}
+	maxRecv *= ductingLinksRecvPerDay
 	resp.Links = make([]DuctingLink, 0, len(listed))
 	for _, p := range listed {
 		idx := append([]int(nil), p.recv...)
@@ -626,9 +645,23 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 			}
 			return rx.obsID > ry.obsID
 		})
-		if len(idx) > ductingLinksMaxRecv {
-			idx = idx[:ductingLinksMaxRecv]
+		seen := make(map[int64]struct{}, min(len(idx), maxRecv))
+		kept := idx[:0]
+		for _, i := range idx {
+			if len(kept) >= maxRecv {
+				break
+			}
+			bucket := in.Recv[i].t - ((in.Recv[i].t%ductingLinksRecvBucketS)+ductingLinksRecvBucketS)%ductingLinksRecvBucketS
+			if row := rowOf[i]; row >= 0 {
+				bucket = rows[row].ValidTime
+			}
+			if _, dup := seen[bucket]; dup {
+				continue
+			}
+			seen[bucket] = struct{}{}
+			kept = append(kept, i)
 		}
+		idx = kept
 		recs := make([]DuctingReception, len(idx))
 		for j, i := range idx {
 			r, m := &in.Recv[i], metric[i]
@@ -993,18 +1026,21 @@ func (s *Server) ductingLinksLOSMethod() string {
 
 // --- HTTP, cache, singleflight ---
 
-// ductingLinksKey is what a cached answer is valid for. The store
-// generation is (maxObsID, totalObs): a new observation raises maxObsID and
-// eviction lowers totalObs. The grid generation is the newest run_time plus
-// the row count and the last valid time (a new step or a pruned one). The
-// visibility generation is nodeVisibilityGen; losMethod is whether terrain
-// is available. Node positions, repeater
-// heights and rewritten signature flags are not in the key; the TTL bounds
-// how long they can be stale.
+// ductingLinksBuildsPerMin is each client's budget of requests that start a
+// rebuild (a first build for a key, or a background refresh of a stale one).
+const ductingLinksBuildsPerMin = 10
+
+// ductingLinksKey is what a cached answer is valid for: the grid generation
+// (the newest run_time plus the row count and the last valid time: a new
+// step or a pruned one), the visibility generation (nodeVisibilityGen: a
+// newly hidden node never stays in a served answer) and whether terrain is
+// available. New observations are not in it: on a live mesh they arrive
+// every few seconds, and an exact match on them would rebuild for nearly
+// every request. They, node positions, repeater heights and rewritten
+// signature flags reach the answer through the stale-while-revalidate
+// refresh after ductingLinksCacheTTL.
 type ductingLinksKey struct {
 	days      int
-	maxObsID  int
-	totalObs  int
 	runTime   int64
 	rowCount  int
 	lastValid int64
@@ -1013,7 +1049,7 @@ type ductingLinksKey struct {
 }
 
 func (k ductingLinksKey) String() string {
-	return fmt.Sprintf("%d|%d|%d|%d|%d|%d|%s|%s", k.days, k.maxObsID, k.totalObs, k.runTime, k.rowCount, k.lastValid, k.vis, k.losMethod)
+	return fmt.Sprintf("%d|%d|%d|%d|%s|%s", k.days, k.runTime, k.rowCount, k.lastValid, k.vis, k.losMethod)
 }
 
 type ductingLinksCached struct {
@@ -1022,20 +1058,37 @@ type ductingLinksCached struct {
 	body []byte
 }
 
+// errDuctingLinksLimited refuses a request that would start a build when the
+// client's budget is spent; wait is when the next token comes.
+type errDuctingLinksLimited struct{ wait time.Duration }
+
+func (e errDuctingLinksLimited) Error() string { return "long-link rebuild rate limited" }
+
 // ductingLinksState caches /api/ducting/links answers (one per days value,
-// so at most ductingHistoryDaysMax entries), collapses concurrent rebuilds
-// of the same key, runs at most one rebuild at a time, and keeps the
-// per-reception memo and the line-of-sight verdicts.
+// so at most ductingHistoryDaysMax entries) and serves them
+// stale-while-revalidate: an answer for the same key is reused while it is
+// younger than ductingLinksCacheTTL; an older one is served at once while
+// one background rebuild replaces it. Only the first build for a key makes
+// its caller wait, and concurrent callers share it (singleflight). Rebuilds
+// run one at a time, each is charged to the client whose request started it,
+// and the state keeps the per-reception memo and the line-of-sight verdicts.
 type ductingLinksState struct {
 	sf      singleflight.Group
-	buildMu sync.Mutex // one rebuild at a time, whatever the key
+	buildMu sync.Mutex     // one rebuild at a time, whatever the key
+	bg      sync.WaitGroup // running background refreshes (tests wait on it)
 
-	mu    sync.Mutex
-	cache map[int]*ductingLinksCached
+	mu       sync.Mutex
+	cache    map[int]*ductingLinksCached
+	inflight map[string]bool // keys being built: joining one charges nothing
 
 	memo *ductingLinksMemo
 	los  *ductingLOSCache
 	now  func() time.Time // tests replace it
+
+	// limit is the per-client build budget, made from the server's trusted
+	// proxies on first use unless already set (tests). nil: no limit.
+	limit     *clientLimiter
+	limitOnce sync.Once
 
 	// gather collects the input; tests replace it. nil: Server.ductingLinksInputFor.
 	gather func(s *Server, days int, now time.Time) (ductingLinksInput, error)
@@ -1043,20 +1096,181 @@ type ductingLinksState struct {
 
 func newDuctingLinksState() *ductingLinksState {
 	return &ductingLinksState{
-		cache: make(map[int]*ductingLinksCached),
-		memo:  newDuctingLinksMemo(ductingLinksMaxMemo),
-		los:   newDuctingLOSCache(ductingLinksLOSMaxCache),
-		now:   time.Now,
+		cache:    make(map[int]*ductingLinksCached),
+		inflight: make(map[string]bool),
+		memo:     newDuctingLinksMemo(ductingLinksMaxMemo),
+		los:      newDuctingLOSCache(ductingLinksLOSMaxCache),
+		now:      time.Now,
 	}
 }
 
-func (st *ductingLinksState) cached(k ductingLinksKey, now time.Time) []byte {
+func (st *ductingLinksState) limiter(s *Server) *clientLimiter {
+	st.limitOnce.Do(func() {
+		if st.limit == nil && s != nil && s.cfg != nil {
+			st.limit = &clientLimiter{
+				ipr: &wsLimiter{state: map[string]*wsIPState{},
+					trustedProxies: parseCIDRList(s.cfg.WSTrustedProxies(), "webSocket.trustedProxies")},
+				rl:  newRateLimiter(ductingLinksBuildsPerMin, time.Minute),
+				tag: "ducting", what: "long-link rebuild",
+			}
+		}
+	})
+	return st.limit
+}
+
+// lookup returns the cached answer for k, if any, and whether it is still
+// fresh.
+func (st *ductingLinksState) lookup(k ductingLinksKey, now time.Time) (body []byte, fresh bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if c := st.cache[k.days]; c != nil && c.key == k && now.Sub(c.at) < ductingLinksCacheTTL*time.Second && !now.Before(c.at) {
-		return c.body
+	c := st.cache[k.days]
+	if c == nil || c.key != k {
+		return nil, false
 	}
-	return nil
+	return c.body, now.Sub(c.at) < ductingLinksCacheTTL*time.Second && !now.Before(c.at)
+}
+
+// claim marks k as being built by this request and charges the client, or
+// reports that a build is already running (nothing charged). A refused
+// charge leaves nothing marked.
+func (st *ductingLinksState) claim(r *http.Request, s *Server, k ductingLinksKey) (started bool, err error) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.inflight[k.String()] {
+		return false, nil
+	}
+	if k.rowCount > 0 { // a pending answer costs nothing to build
+		if ok, wait := st.limiter(s).take(r); !ok {
+			return false, errDuctingLinksLimited{wait}
+		}
+	}
+	st.inflight[k.String()] = true
+	return true, nil
+}
+
+// serve answers GET /api/ducting/links?days=N. historyDays is the stored
+// history (already clamped to 1..ductingHistoryDaysMax by the caller): days
+// defaults to it and must be an integer in 1..historyDays.
+func (st *ductingLinksState) serve(w http.ResponseWriter, r *http.Request, s *Server, src ductingStepSource, historyDays int) {
+	days := historyDays
+	if v := r.URL.Query().Get("days"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > historyDays {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("days must be an integer from 1 to %d", historyDays))
+			return
+		}
+		days = n
+	}
+	body, err := st.get(r, s, src, days, historyDays)
+	var lim errDuctingLinksLimited
+	switch {
+	case errors.As(err, &lim):
+		writeRateLimited(w, lim.wait)
+		return
+	case err != nil:
+		log.Printf("[ducting] links: %v", err)
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, DuctingLinksResponse{
+			Status: "error", Error: "long-link analysis is unavailable", FreqMHz: ductingLinksFreq(s.cfg),
+			Days: days, GeneratedAt: st.now().Unix(), Summary: ductingLinksEmptySummary(s.ductingLinksLOSMethod()), Links: []DuctingLink{},
+		})
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	writeJSONBytes(w, body)
+}
+
+// get returns the encoded answer for days: the cached one (starting one
+// background refresh when it is stale), or the first build for its key.
+func (st *ductingLinksState) get(r *http.Request, s *Server, src ductingStepSource, days, historyDays int) ([]byte, error) {
+	k, err := st.key(s, src, days)
+	if err != nil {
+		return nil, err
+	}
+	if b, fresh := st.lookup(k, st.now()); b != nil {
+		if !fresh {
+			st.refresh(r, s, src, k, historyDays)
+		}
+		return b, nil
+	}
+	started, err := st.claim(r, s, k)
+	if err != nil {
+		return nil, err
+	}
+	v, err, _ := st.sf.Do(k.String(), func() (interface{}, error) {
+		return st.build(s, src, k, historyDays)
+	})
+	if started {
+		st.release(k)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return v.([]byte), nil
+}
+
+func (st *ductingLinksState) release(k ductingLinksKey) {
+	st.mu.Lock()
+	delete(st.inflight, k.String())
+	st.mu.Unlock()
+}
+
+// refresh starts one background rebuild of a stale answer, unless one is
+// running or the client's budget is spent (the stale answer is served
+// either way).
+func (st *ductingLinksState) refresh(r *http.Request, s *Server, src ductingStepSource, k ductingLinksKey, historyDays int) {
+	if started, err := st.claim(r, s, k); !started || err != nil {
+		return
+	}
+	st.bg.Add(1)
+	go func() {
+		defer st.bg.Done()
+		defer st.release(k)
+		if _, err, _ := st.sf.Do(k.String(), func() (interface{}, error) {
+			return st.build(s, src, k, historyDays)
+		}); err != nil {
+			log.Printf("[ducting] links: background rebuild: %v", err)
+		}
+	}()
+}
+
+// build computes and caches the answer for k, one build at a time.
+func (st *ductingLinksState) build(s *Server, src ductingStepSource, k ductingLinksKey, historyDays int) ([]byte, error) {
+	st.buildMu.Lock()
+	defer st.buildMu.Unlock()
+	now := st.now()
+	if b, fresh := st.lookup(k, now); b != nil && fresh {
+		return b, nil // built while this caller waited for buildMu
+	}
+	var resp *DuctingLinksResponse
+	if k.rowCount == 0 {
+		// Nothing stored yet: skip the store scan entirely.
+		resp = &DuctingLinksResponse{
+			Status: "pending", FreqMHz: ductingLinksFreq(s.cfg), Days: k.days, GeneratedAt: now.Unix(),
+			Summary: ductingLinksEmptySummary(k.losMethod), Links: []DuctingLink{},
+		}
+	} else {
+		gather := st.gather
+		if gather == nil {
+			gather = (*Server).ductingLinksInputFor
+		}
+		in, err := gather(s, k.days, now)
+		if err != nil {
+			return nil, err
+		}
+		in.Memo, in.LOS, in.HistoryDays = st.memo, st.los, historyDays
+		if resp, err = buildDuctingLinks(in, src, now); err != nil {
+			return nil, err
+		}
+	}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	st.mu.Lock()
+	st.cache[k.days] = &ductingLinksCached{key: k, at: now, body: b}
+	st.mu.Unlock()
+	return b, nil
 }
 
 func (st *ductingLinksState) key(s *Server, src ductingStepSource, days int) (ductingLinksKey, error) {
@@ -1074,90 +1288,5 @@ func (st *ductingLinksState) key(s *Server, src ductingStepSource, days int) (du
 			k.lastValid = r.ValidTime
 		}
 	}
-	if s.store != nil {
-		s.store.mu.RLock()
-		k.maxObsID, k.totalObs = s.store.maxObsID, s.store.totalObs
-		s.store.mu.RUnlock()
-	}
 	return k, nil
-}
-
-// serve answers GET /api/ducting/links?days=N. historyDays is the stored
-// history (already clamped to 1..ductingHistoryDaysMax by the caller): days
-// defaults to it and must be an integer in 1..historyDays.
-func (st *ductingLinksState) serve(w http.ResponseWriter, r *http.Request, s *Server, src ductingStepSource, historyDays int) {
-	days := historyDays
-	if v := r.URL.Query().Get("days"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > historyDays {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("days must be an integer from 1 to %d", historyDays))
-			return
-		}
-		days = n
-	}
-	body, err := st.get(s, src, days)
-	if err != nil {
-		log.Printf("[ducting] links: %v", err)
-		w.Header().Set("Cache-Control", "no-store")
-		writeJSON(w, DuctingLinksResponse{
-			Status: "error", Error: "long-link analysis is unavailable", FreqMHz: ductingLinksFreq(s.cfg),
-			Days: days, GeneratedAt: st.now().Unix(), Summary: ductingLinksEmptySummary(s.ductingLinksLOSMethod()), Links: []DuctingLink{},
-		})
-		return
-	}
-	w.Header().Set("Cache-Control", "public, max-age=60")
-	writeJSONBytes(w, body)
-}
-
-// get returns the encoded answer for days, from the cache or one shared
-// rebuild.
-func (st *ductingLinksState) get(s *Server, src ductingStepSource, days int) ([]byte, error) {
-	k, err := st.key(s, src, days)
-	if err != nil {
-		return nil, err
-	}
-	if b := st.cached(k, st.now()); b != nil {
-		return b, nil
-	}
-	v, err, _ := st.sf.Do(k.String(), func() (interface{}, error) {
-		st.buildMu.Lock()
-		defer st.buildMu.Unlock()
-		now := st.now()
-		if b := st.cached(k, now); b != nil {
-			return b, nil // built while this caller waited for buildMu
-		}
-		var resp *DuctingLinksResponse
-		if k.rowCount == 0 {
-			// Nothing stored yet: skip the store scan entirely.
-			resp = &DuctingLinksResponse{
-				Status: "pending", FreqMHz: ductingLinksFreq(s.cfg), Days: days, GeneratedAt: now.Unix(),
-				Summary: ductingLinksEmptySummary(k.losMethod), Links: []DuctingLink{},
-			}
-		} else {
-			gather := st.gather
-			if gather == nil {
-				gather = (*Server).ductingLinksInputFor
-			}
-			in, err := gather(s, days, now)
-			if err != nil {
-				return nil, err
-			}
-			in.Memo, in.LOS = st.memo, st.los
-			if resp, err = buildDuctingLinks(in, src, now); err != nil {
-				return nil, err
-			}
-		}
-		b, err := json.Marshal(resp)
-		if err != nil {
-			return nil, err
-		}
-		st.mu.Lock()
-		st.cache[days] = &ductingLinksCached{key: k, at: now, body: b}
-		st.mu.Unlock()
-		return b, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return v.([]byte), nil
 }

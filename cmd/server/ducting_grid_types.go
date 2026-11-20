@@ -25,18 +25,19 @@ import ducting "github.com/meshcore-analyzer/ducting"
 // follow-up list).
 const (
 	ductingGridModel        = "gfs"
-	ductingGridMaxCells     = 4000   // cells per /api/ducting/grid answer
-	ductingLinksMaxKm       = 1000   // receptions over this distance are treated as bad positions
-	ductingLinksMaxPairs    = 500    // node pairs per /api/ducting/links answer, longest first
-	ductingLinksMaxRecv     = 50     // receptions listed per pair, newest first
-	ductingLinksPathKm      = 25.0   // path sample spacing
-	ductingLinksStepWindowS = 5400   // a reception uses the grid step within ±90 min of it
-	ductingLinksDuctFrac    = 0.5    // "during a duct": at least this share of path samples carry LoRa
-	ductingLinksMaxSamples  = 64     // path samples per reception at most
-	ductingLinksCacheTTL    = 5 * 60 // seconds a computed links answer is reused (same days, data generation, run, visibility)
-	ductingLinksMaxMemo     = 5000   // per-reception results remembered across rebuilds, keyed by (observation, run_time)
-	ductingGridLRUSteps     = 8      // decoded steps kept in memory (~3.4 MB each at 0.5°)
-	ductingGridMaxAgeS      = 600    // Cache-Control max-age of /api/ducting/grid
+	ductingGridMaxCells     = 4000     // cells per /api/ducting/grid answer
+	ductingLinksMaxKm       = 1000     // receptions over this distance are treated as bad positions
+	ductingLinksMaxPairs    = 500      // node pairs per /api/ducting/links answer, longest first
+	ductingLinksRecvBucketS = 3 * 3600 // receptions listed per pair: the newest per stored step (or per 3 h UTC bucket without one)
+	ductingLinksRecvPerDay  = 8        // ... and at most this many per day of history
+	ductingLinksPathKm      = 25.0     // path sample spacing
+	ductingLinksStepWindowS = 5400     // a reception uses the grid step within ±90 min of it
+	ductingLinksDuctFrac    = 0.5      // "during a duct": at least this share of path samples carry LoRa
+	ductingLinksMaxSamples  = 64       // path samples per reception at most
+	ductingLinksCacheTTL    = 5 * 60   // seconds a computed links answer is reused (same days, data generation, run, visibility)
+	ductingLinksMaxMemo     = 5000     // per-reception results remembered across rebuilds, keyed by (observation, run_time)
+	ductingGridLRUSteps     = 8        // decoded steps kept in memory (~3.4 MB each at 0.5°)
+	ductingGridMaxAgeS      = 600      // Cache-Control max-age of /api/ducting/grid
 	ductingHistoryDaysMax   = 30
 )
 
@@ -101,15 +102,19 @@ type DuctingLinksResponse struct {
 // are refracted at all. A pair is listed only when it is beyond line of
 // sight (LosMethod says how that was decided).
 type DuctingLinksSummary struct {
-	Links      int `json:"links"`      // distinct beyond-line-of-sight node pairs (before the ductingLinksMaxPairs cap)
-	Receptions int `json:"receptions"` // receptions over all pairs
-	WithGrid   int `json:"withGrid"`   // receptions with a stored step within ±90 min and data along the path
-	DuringDuct int `json:"duringDuct"` // of WithGrid: path duct share >= ductingLinksDuctFrac
-	// BaselineDuctFrac: over every stored step in the period and every pair,
-	// the share of (pair, step) combinations whose path duct share >=
+	Links int `json:"links"` // distinct beyond-line-of-sight node pairs (before the ductingLinksMaxPairs cap)
+	// ListedPairs is how many of them are listed (the ductingLinksMaxPairs
+	// longest). Every statistic below is over the listed pairs only, so the
+	// receptions and the baseline describe the same paths.
+	ListedPairs int `json:"listedPairs"`
+	Receptions  int `json:"receptions"` // receptions over the listed pairs
+	WithGrid    int `json:"withGrid"`   // of Receptions: with a stored step within ±90 min and data along the path
+	DuringDuct  int `json:"duringDuct"` // of WithGrid: path duct share >= ductingLinksDuctFrac
+	// BaselineDuctFrac: over every stored step in the period and every listed
+	// pair, the share of (pair, step) combinations whose path duct share >=
 	// ductingLinksDuctFrac. -1 when there is no data.
 	BaselineDuctFrac float64 `json:"baselineDuctFrac"`
-	// RecvMeanGradNkm: mean, over receptions with a path mean dN/dh, of that
+	// RecvMeanGradNkm: mean, over the receptions (of the listed pairs) with a path mean dN/dh, of that
 	// mean (N/km; more negative bends more). BaselineMeanGradNkm: the same
 	// over the (pair, step) combinations of BaselineDuctFrac. nil: no data.
 	RecvMeanGradNkm     *float64 `json:"recvMeanGradNkm"`
@@ -130,14 +135,18 @@ type DuctingLinksSummary struct {
 	UnverifiedPairs int `json:"unverifiedPairs"`
 }
 
-// DuctingLink is one node pair: A transmitted the advert, B (an observer
-// that is also a node) heard it with no hops in between.
+// DuctingLink is one node pair: A transmitted, B heard it directly (a
+// zero-hop advert at an observer node, or consecutive certain hops of a
+// flood path).
 type DuctingLink struct {
-	A          DuctingLinkEnd     `json:"a"`
-	B          DuctingLinkEnd     `json:"b"`
-	DistKm     float64            `json:"distKm"`
-	HorizonKm  float64            `json:"horizonKm"` // 4.12 * (sqrt(hA) + sqrt(hB))
-	Count      int                `json:"count"`     // receptions in the period
+	A         DuctingLinkEnd `json:"a"`
+	B         DuctingLinkEnd `json:"b"`
+	DistKm    float64        `json:"distKm"`
+	HorizonKm float64        `json:"horizonKm"` // 4.12 * (sqrt(hA) + sqrt(hB))
+	Count     int            `json:"count"`     // all receptions in the period
+	// Receptions, newest first, thinned by time: the newest per stored grid
+	// step (per 3 h UTC bucket for one without a step), at most
+	// ductingLinksRecvPerDay per day of history.
 	Receptions []DuctingReception `json:"receptions"`
 }
 
