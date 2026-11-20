@@ -17,6 +17,16 @@ const (
 	defaultDuctingRefreshMinutes = 360
 	defaultDuctingForecastHours  = 48
 	defaultDuctingBaseURL        = "https://api.open-meteo.com"
+	defaultDuctingHistoryDays    = 7
+
+	// ducting.source values.
+	ductingSourceGrid      = "gfs-grid"
+	ductingSourceOpenMeteo = "open-meteo"
+
+	// The stored global grid (gfs-grid): NOAA GFS at 0.5°.
+	ductingGridNativeStepDeg = 0.5
+	ductingGridModelLabel    = "NOAA GFS"
+	ductingGridAttribution   = "Weather data: NOAA GFS 0.5° (NOAA Open Data Dissemination)"
 
 	// ductingDailyCallBudget stays under Open-Meteo's free tier of 10,000
 	// calls a day, leaving headroom for other users of the same key/IP.
@@ -66,6 +76,31 @@ func (c DuctingConfig) marginDegOrDefault() float64 {
 
 func (c *DuctingConfig) enabled() bool { return c != nil && c.Enabled }
 
+// ductingSourceValid reports whether s names a supported ducting.source;
+// "" is the default (gfs-grid).
+func ductingSourceValid(s string) bool {
+	return s == "" || s == ductingSourceGrid || s == ductingSourceOpenMeteo
+}
+
+// source is the effective ducting.source: gfs-grid unless open-meteo is
+// configured (an unsupported value falls back to gfs-grid, as resolved()
+// warns). Cheap, for per-request checks; safe on a nil config.
+func (c *DuctingConfig) source() string {
+	if c != nil && c.Source == ductingSourceOpenMeteo {
+		return ductingSourceOpenMeteo
+	}
+	return ductingSourceGrid
+}
+
+// historyDays is the effective ducting.historyDays (resolved() warns about
+// an out-of-range value). Safe on a nil config.
+func (c *DuctingConfig) historyDays() int {
+	if c == nil || c.HistoryDays < 1 || c.HistoryDays > ductingHistoryDaysMax {
+		return defaultDuctingHistoryDays
+	}
+	return c.HistoryDays
+}
+
 // resolved applies defaults and validates. Invalid values fall back to the
 // default and add a warning naming the key. Warnings never echo baseUrl,
 // which may carry credentials.
@@ -77,6 +112,20 @@ func (c *DuctingConfig) resolved() (DuctingConfig, []string) {
 	}
 	r.Enabled = c.Enabled
 
+	r.Source = c.source()
+	if !ductingSourceValid(c.Source) {
+		warns = append(warns, fmt.Sprintf("ducting.source %q is not supported (use %q or %q), using %q",
+			c.Source, ductingSourceGrid, ductingSourceOpenMeteo, ductingSourceGrid))
+	}
+	r.HistoryDays = c.historyDays()
+	if c.HistoryDays != 0 && c.HistoryDays != r.HistoryDays {
+		warns = append(warns, fmt.Sprintf("ducting.historyDays must be 1..%d, using %d", ductingHistoryDaysMax, defaultDuctingHistoryDays))
+	}
+	// GridBaseURL is the ingestor's (it downloads the GFS files); the server
+	// never reads it, so it is neither validated nor kept here.
+
+	// The keys below apply to the Open-Meteo source only; they are resolved
+	// (and warned about) whatever the source, as before.
 	r.Model = c.Model
 	if r.Model == "" {
 		r.Model = defaultDuctingModel
@@ -215,14 +264,25 @@ func ductingMaxPoints(c DuctingConfig, m DuctingModel) int {
 }
 
 // clientConfig is /api/config/client "ducting"; nil when disabled. Never
-// carries baseUrl.
+// carries baseUrl or gridBaseUrl. historyDays is set for gfs-grid only.
 func (c *DuctingConfig) clientConfig() *DuctingClientConfig {
 	if !c.enabled() {
 		return nil
 	}
 	r, _ := c.resolved()
+	if r.Source == ductingSourceGrid {
+		return &DuctingClientConfig{
+			Source:      ductingSourceGrid,
+			Model:       ductingGridModel,
+			ModelLabel:  ductingGridModelLabel,
+			StepDeg:     ductingGridNativeStepDeg,
+			Attribution: ductingGridAttribution,
+			HistoryDays: r.HistoryDays,
+		}
+	}
 	m, _ := ductingModel(r.Model)
 	return &DuctingClientConfig{
+		Source:      ductingSourceOpenMeteo,
 		Model:       m.ID,
 		ModelLabel:  m.Label,
 		StepDeg:     r.GridStepDeg,
@@ -237,6 +297,11 @@ func logDuctingConfig(c *DuctingConfig) {
 	r, warns := c.resolved()
 	for _, w := range warns {
 		log.Printf("[ducting] %s", w)
+	}
+	if r.Source == ductingSourceGrid {
+		log.Printf("[ducting] enabled (source=%s, model=%s, step=%g deg, history=%d d)",
+			ductingSourceGrid, ductingGridModel, ductingGridNativeStepDeg, r.HistoryDays)
+		return
 	}
 	m, _ := ductingModel(r.Model)
 	budget := "self-hosted: no call budget"

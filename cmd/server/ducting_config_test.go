@@ -39,6 +39,9 @@ func TestDuctingDefaults(t *testing.T) {
 	if len(warns) != 0 {
 		t.Fatalf("unexpected warnings: %v", warns)
 	}
+	if r.Source != "gfs-grid" || r.HistoryDays != 7 || r.GridBaseURL != "" {
+		t.Fatalf("bad grid defaults: %+v", r)
+	}
 	if r.Model != "gfs" || r.GridStepDeg != 0.5 || r.MaxPoints != 450 || r.RefreshMinutes != 360 ||
 		r.ForecastHours != 48 || r.BaseURL != "https://api.open-meteo.com" || r.Area != nil ||
 		r.MarginDeg == nil || *r.MarginDeg != 5 {
@@ -230,14 +233,101 @@ func TestDuctingClientConfig(t *testing.T) {
 	if (&DuctingConfig{Model: "gfs"}).clientConfig() != nil {
 		t.Fatal("disabled config must have no client config")
 	}
-	cc := (&DuctingConfig{Enabled: true, Model: "icon", GridStepDeg: 1, BaseURL: "https://u:p@secret.example"}).clientConfig()
-	if cc == nil || cc.Model != "icon" || cc.ModelLabel != "DWD ICON" || cc.StepDeg != 1 ||
-		cc.Attribution != "Weather data by Open-Meteo.com (CC BY 4.0), DWD ICON" {
+	cc := (&DuctingConfig{Enabled: true, Source: "open-meteo", Model: "icon", GridStepDeg: 1, BaseURL: "https://u:p@secret.example"}).clientConfig()
+	if cc == nil || cc.Source != "open-meteo" || cc.Model != "icon" || cc.ModelLabel != "DWD ICON" || cc.StepDeg != 1 ||
+		cc.Attribution != "Weather data by Open-Meteo.com (CC BY 4.0), DWD ICON" || cc.HistoryDays != 0 {
 		t.Fatalf("%+v", cc)
 	}
-	cc = (&DuctingConfig{Enabled: true, Model: "bogus"}).clientConfig()
+	cc = (&DuctingConfig{Enabled: true, Source: "open-meteo", Model: "bogus"}).clientConfig()
 	if cc.Model != "gfs" || cc.StepDeg != 0.5 {
 		t.Fatalf("fallback: %+v", cc)
+	}
+}
+
+func TestDuctingClientConfigGrid(t *testing.T) {
+	want := DuctingClientConfig{
+		Source: "gfs-grid", Model: "gfs", ModelLabel: "NOAA GFS", StepDeg: 0.5,
+		Attribution: "Weather data: NOAA GFS 0.5° (NOAA Open Data Dissemination)", HistoryDays: 7,
+	}
+	// The Open-Meteo keys do not leak into the grid's client config.
+	for _, c := range []DuctingConfig{
+		{Enabled: true},
+		{Enabled: true, Source: "gfs-grid", Model: "icon", GridStepDeg: 1, GridBaseURL: "https://mirror.example"},
+		{Enabled: true, Source: "bogus"},
+	} {
+		if cc := c.clientConfig(); cc == nil || *cc != want {
+			t.Errorf("%+v: %+v", c, cc)
+		}
+	}
+	want.HistoryDays = 30
+	if cc := (&DuctingConfig{Enabled: true, HistoryDays: 30}).clientConfig(); *cc != want {
+		t.Errorf("historyDays 30: %+v", cc)
+	}
+}
+
+func TestDuctingSourceAndHistoryDays(t *testing.T) {
+	for _, src := range []string{"", "gfs-grid", "open-meteo"} {
+		r, warns := (&DuctingConfig{Source: src}).resolved()
+		want := src
+		if want == "" {
+			want = "gfs-grid"
+		}
+		if r.Source != want || len(warns) != 0 {
+			t.Errorf("source %q: %q %v", src, r.Source, warns)
+		}
+	}
+	for _, src := range []string{"open_meteo", "GFS-GRID", "ecmwf"} {
+		r, warns := (&DuctingConfig{Source: src}).resolved()
+		if r.Source != "gfs-grid" || !hasWarn(warns, "ducting.source") {
+			t.Errorf("source %q: %q %v", src, r.Source, warns)
+		}
+		if (&DuctingConfig{Source: src}).source() != "gfs-grid" {
+			t.Errorf("source() %q", src)
+		}
+	}
+	if (*DuctingConfig)(nil).source() != "gfs-grid" || (*DuctingConfig)(nil).historyDays() != 7 {
+		t.Error("nil config defaults")
+	}
+	for _, d := range []int{1, 7, 30} {
+		r, warns := (&DuctingConfig{HistoryDays: d}).resolved()
+		if r.HistoryDays != d || len(warns) != 0 {
+			t.Errorf("historyDays %d: %d %v", d, r.HistoryDays, warns)
+		}
+	}
+	for _, d := range []int{-1, 31, 365} {
+		r, warns := (&DuctingConfig{HistoryDays: d}).resolved()
+		if r.HistoryDays != 7 || !hasWarn(warns, "ducting.historyDays must be 1..30, using 7") {
+			t.Errorf("historyDays %d: %d %v", d, r.HistoryDays, warns)
+		}
+	}
+	// The server never reads gridBaseUrl: no validation, no warning, not kept.
+	r, warns := (&DuctingConfig{GridBaseURL: "not a url"}).resolved()
+	if r.GridBaseURL != "" || len(warns) != 0 {
+		t.Errorf("gridBaseUrl: %q %v", r.GridBaseURL, warns)
+	}
+	// Open-Meteo keys keep their validation under either source.
+	if _, warns := (&DuctingConfig{Source: "gfs-grid", MaxPoints: -1}).resolved(); !hasWarn(warns, "ducting.maxPoints") {
+		t.Errorf("maxPoints under gfs-grid: %v", warns)
+	}
+}
+
+func TestDuctingLogConfigGrid(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	logDuctingConfig(&DuctingConfig{Enabled: true})
+	if !strings.Contains(buf.String(), "[ducting] enabled (source=gfs-grid, model=gfs, step=0.5 deg, history=7 d)") {
+		t.Errorf("log %q", buf.String())
+	}
+	buf.Reset()
+	logDuctingConfig(&DuctingConfig{Enabled: true, Source: "nope", HistoryDays: 3})
+	if !strings.Contains(buf.String(), "ducting.source") || !strings.Contains(buf.String(), "history=3 d)") {
+		t.Errorf("log %q", buf.String())
+	}
+	buf.Reset()
+	logDuctingConfig(&DuctingConfig{Enabled: true, Source: "open-meteo"})
+	if !strings.Contains(buf.String(), "[ducting] enabled (model=gfs, step=0.5 deg, margin=5 deg") {
+		t.Errorf("open-meteo log %q", buf.String())
 	}
 }
 
@@ -250,13 +340,26 @@ func TestDuctingClientConfigEndpoint(t *testing.T) {
 	if _, ok := off["ducting"]; ok {
 		t.Fatal("ducting present when disabled")
 	}
-	on := clientConfigFor(t, `{"ducting":{"enabled":true,"model":"icon","gridStepDeg":1,"baseUrl":"https://om.example.com"}}`)
+	on := clientConfigFor(t, `{"ducting":{"enabled":true,"source":"open-meteo","model":"icon","gridStepDeg":1,"baseUrl":"https://om.example.com"}}`)
 	d, ok := on["ducting"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("ducting is %T", on["ducting"])
 	}
-	if d["model"] != "icon" || d["modelLabel"] != "DWD ICON" || d["stepDeg"] != float64(1) || d["attribution"] == "" {
+	if d["source"] != "open-meteo" || d["model"] != "icon" || d["modelLabel"] != "DWD ICON" || d["stepDeg"] != float64(1) || d["attribution"] == "" {
 		t.Fatalf("%v", d)
+	}
+	if _, ok := d["historyDays"]; ok {
+		t.Fatalf("historyDays under open-meteo: %v", d)
+	}
+	grid := clientConfigFor(t, `{"ducting":{"enabled":true,"historyDays":14,"gridBaseUrl":"https://mirror.example"}}`)
+	g, ok := grid["ducting"].(map[string]interface{})
+	if !ok || g["source"] != "gfs-grid" || g["model"] != "gfs" || g["stepDeg"] != 0.5 || g["historyDays"] != float64(14) {
+		t.Fatalf("grid: %v", grid["ducting"])
+	}
+	for k := range g {
+		if strings.EqualFold(k, "gridBaseUrl") {
+			t.Fatalf("gridBaseUrl leaked: %v", g)
+		}
 	}
 	for k := range d {
 		if strings.EqualFold(k, "baseUrl") {
@@ -321,12 +424,12 @@ func TestDuctingLogConfigSelfHosted(t *testing.T) {
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
-	logDuctingConfig(&DuctingConfig{Enabled: true, Model: "gfs", BaseURL: "http://localhost:8080"})
+	logDuctingConfig(&DuctingConfig{Enabled: true, Source: "open-meteo", Model: "gfs", BaseURL: "http://localhost:8080"})
 	if !strings.Contains(buf.String(), "self-hosted: no call budget") || strings.Contains(buf.String(), "budget cap") {
 		t.Errorf("log %q", buf.String())
 	}
 	buf.Reset()
-	logDuctingConfig(&DuctingConfig{Enabled: true, Model: "gfs"})
+	logDuctingConfig(&DuctingConfig{Enabled: true, Source: "open-meteo", Model: "gfs"})
 	if !strings.Contains(buf.String(), "budget cap") {
 		t.Errorf("public log %q", buf.String())
 	}

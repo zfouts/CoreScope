@@ -81,10 +81,12 @@ type DuctingConfig struct {
 // DuctingClientConfig is the `ducting` field of /api/config/client; nil
 // (omitted) when the feature is off. Never carries baseUrl.
 type DuctingClientConfig struct {
+	Source      string  `json:"source"` // "gfs-grid" (/api/ducting/meta + /api/ducting/grid) | "open-meteo" (/api/ducting)
 	Model       string  `json:"model"`
 	ModelLabel  string  `json:"modelLabel"`
 	StepDeg     float64 `json:"stepDeg"`
 	Attribution string  `json:"attribution"`
+	HistoryDays int     `json:"historyDays,omitempty"` // gfs-grid only
 }
 
 // DuctingCell is one grid cell in GET /api/ducting. Every array has one entry

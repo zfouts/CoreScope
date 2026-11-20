@@ -124,7 +124,7 @@ func TestDuctingServiceSnapshotMatchesFixture(t *testing.T) {
 	if resp.Status != "ok" || resp.Model != "gfs" || resp.ModelLabel != "NOAA GFS" || resp.StepDeg != 0.5 {
 		t.Errorf("header %+v", resp)
 	}
-	cc := (&DuctingConfig{Enabled: true}).clientConfig()
+	cc := (&DuctingConfig{Enabled: true, Source: ductingSourceOpenMeteo}).clientConfig()
 	if resp.Attribution != cc.Attribution {
 		t.Errorf("attribution %q, want %q", resp.Attribution, cc.Attribution)
 	}
@@ -580,7 +580,7 @@ func TestDuctingRoute(t *testing.T) {
 	if rec := get(); rec.Code != http.StatusNotFound {
 		t.Errorf("disabled: %d, want 404", rec.Code)
 	}
-	s.cfg.Ducting = &DuctingConfig{Enabled: true}
+	s.cfg.Ducting = &DuctingConfig{Enabled: true, Source: ductingSourceOpenMeteo}
 	if rec := get(); rec.Code != http.StatusNotFound {
 		t.Errorf("enabled without a service: %d, want 404", rec.Code)
 	}
@@ -825,7 +825,7 @@ func TestDuctingRouteCacheControlOK(t *testing.T) {
 	// Through the router: the handler's header wins over the /api/ no-store
 	// middleware for an ok snapshot.
 	s, router := setupTestServer(t)
-	s.cfg.Ducting = &DuctingConfig{Enabled: true}
+	s.cfg.Ducting = &DuctingConfig{Enabled: true, Source: ductingSourceOpenMeteo}
 	s.ducting = newDuctingService(s.cfg.Ducting, nil)
 	resp := s.ducting.baseResponse("ok", "")
 	resp.Times = []int64{time.Now().Unix()}
@@ -1002,7 +1002,7 @@ func TestDuctingServiceETag(t *testing.T) {
 
 func TestDuctingRouteETag(t *testing.T) {
 	s, router := setupTestServer(t)
-	s.cfg.Ducting = &DuctingConfig{Enabled: true}
+	s.cfg.Ducting = &DuctingConfig{Enabled: true, Source: ductingSourceOpenMeteo}
 	s.ducting = newDuctingService(s.cfg.Ducting, nil)
 	resp := s.ducting.baseResponse("ok", "")
 	resp.GeneratedAt = 1795046400

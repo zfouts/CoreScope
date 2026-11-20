@@ -161,8 +161,15 @@ type Server struct {
 	elevation *elevationService
 	// planner serves /api/planner/*; nil unless planner.enabled.
 	planner *plannerService
-	// ducting serves /api/ducting; nil unless ducting.enabled.
+	// ducting serves /api/ducting; nil unless ducting.enabled with source
+	// open-meteo.
 	ducting *ductingService
+	// ductingGrid serves /api/ducting/meta and /api/ducting/grid; nil unless
+	// ducting.enabled with source gfs-grid (the default).
+	ductingGrid *ductingGridService
+	// ductingLinks serves /api/ducting/links (ducting_links.go); set with
+	// ductingGrid.
+	ductingLinks *ductingLinksState
 
 	// Optional user management (docs/specs/2026-10-06-user-management-design.md).
 	// Nil unless userManagement.enabled; see initUserManagement.
@@ -395,7 +402,10 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/planner/relay", s.handlePlannerRelay).Methods("GET")
 	r.HandleFunc("/api/planner/viewshed", s.handlePlannerViewshed).Methods("GET")
 	r.HandleFunc("/api/planner/coverage", s.handlePlannerCoverage).Methods("GET")
-	r.HandleFunc("/api/ducting", s.handleDucting).Methods("GET")
+	r.HandleFunc("/api/ducting", s.handleDuctingOpenMeteo).Methods("GET")
+	r.HandleFunc("/api/ducting/meta", s.handleDuctingMeta).Methods("GET")
+	r.HandleFunc("/api/ducting/grid", s.handleDuctingGrid).Methods("GET")
+	r.HandleFunc("/api/ducting/links", s.handleDuctingLinks).Methods("GET")
 	r.HandleFunc("/api/observers/metrics/summary", s.handleMetricsSummary).Methods("GET")
 	r.HandleFunc("/api/observers/{id}/metrics", s.handleObserverMetrics).Methods("GET")
 	r.HandleFunc("/api/observers/{id}/analytics", s.handleObserverAnalytics).Methods("GET")
