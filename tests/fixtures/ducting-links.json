@@ -1,0 +1,138 @@
+{
+ "status": "ok",
+ "freqMHz": 869.525,
+ "days": 7,
+ "generatedAt": 1795046340,
+ "summary": {
+  "links": 4,
+  "receptions": 6,
+  "withGrid": 5,
+  "duringDuct": 2,
+  "baselineDuctFrac": 0.23
+ },
+ "links": [
+  {
+   "a": {
+    "pubkey": "aa11",
+    "name": "Hill Top",
+    "lat": 51.2,
+    "lon": -0.5,
+    "heightM": 12,
+    "heightKnown": true
+   },
+   "b": {
+    "pubkey": "bb22",
+    "name": "<img src=x onerror=alert(1)>",
+    "lat": 52.8,
+    "lon": 0.7,
+    "heightM": 10,
+    "heightKnown": false
+   },
+   "distKm": 190.4,
+   "horizonKm": 59.3,
+   "count": 3,
+   "receptions": [
+    {
+     "t": 1795047000,
+     "snr": -5.5,
+     "rssi": -118,
+     "ductFrac": 0.8,
+     "superFrac": 1
+    },
+    {
+     "t": 1795026400,
+     "snr": 2,
+     "rssi": -101,
+     "ductFrac": 0.1,
+     "superFrac": 0.4
+    }
+   ]
+  },
+  {
+   "a": {
+    "pubkey": "cc33",
+    "name": "Coast",
+    "lat": 51.4,
+    "lon": -0.9,
+    "heightM": 8,
+    "heightKnown": true
+   },
+   "b": {
+    "pubkey": "dd44",
+    "name": "Ridge",
+    "lat": 52.6,
+    "lon": -0.2,
+    "heightM": 30,
+    "heightKnown": true
+   },
+   "distKm": 142,
+   "horizonKm": 34.2,
+   "count": 1,
+   "receptions": [
+    {
+     "t": 1795044600,
+     "snr": -12.25,
+     "ductFrac": 0.2,
+     "superFrac": 0
+    }
+   ]
+  },
+  {
+   "a": {
+    "pubkey": "ee55",
+    "name": "",
+    "lat": 51.1,
+    "lon": 0.9,
+    "heightM": 10,
+    "heightKnown": false
+   },
+   "b": {
+    "pubkey": "ff66",
+    "name": "Mast",
+    "lat": 51.9,
+    "lon": 0.1,
+    "heightM": 40,
+    "heightKnown": true
+   },
+   "distKm": 105,
+   "horizonKm": 39,
+   "count": 1,
+   "receptions": [
+    {
+     "t": 1795051800,
+     "rssi": -125,
+     "ductFrac": -1,
+     "superFrac": -1
+    }
+   ]
+  },
+  {
+   "a": {
+    "pubkey": "0a0b",
+    "name": "Late",
+    "lat": 51.6,
+    "lon": -0.6,
+    "heightM": 10,
+    "heightKnown": true
+   },
+   "b": {
+    "pubkey": "0c0d",
+    "name": "Later",
+    "lat": 52.9,
+    "lon": 0.4,
+    "heightM": 10,
+    "heightKnown": true
+   },
+   "distKm": 160,
+   "horizonKm": 26,
+   "count": 1,
+   "receptions": [
+    {
+     "t": 1795051801,
+     "ductFrac": 0.9,
+     "superFrac": 1
+    }
+   ]
+  }
+ ]
+}

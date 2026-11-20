@@ -676,6 +676,14 @@
 
     // Shared theme-synced basemap + provider picker (map-tile-providers.js).
     autoTiles = window.MC_attachAutoTiles(map, { controlPosition: 'topleft' });
+    // Deep link #/map?duct=1 ticks the ducting overlay (map-ducting.js adds
+    // it with ductT when the user picks a time). It is registered only once
+    // /api/config/client has answered, so wait for that.
+    if (urlParams.get('duct') === '1' && typeof window.MC_setTileOverlay === 'function') {
+      Promise.resolve(window.MeshConfigReady).catch(() => {}).then(() => {
+        if (gen === pageGen) window.MC_setTileOverlay('ducting', true);
+      });
+    }
 
     // #1689 r1 (adv #4): live re-render when the customizer "hide 1-byte
     // path hops" toggle flips. Before this listener the toggle only took

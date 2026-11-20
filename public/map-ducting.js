@@ -75,6 +75,48 @@
  * --mc-duct-lora and the dotted edge line from --mc-duct-edge, all read at
  * draw time.
  *   window.MC_ductEdges(grid)           -> [[[lat, lon], [lat, lon]], ...]
+ *
+ * Global grid with history (MC_DUCTING_CFG.source "gfs-grid"; any other
+ * source is the Open-Meteo mode above, unchanged):
+ *   - GET /api/ducting/meta gives the stored times (every 3 h, past and
+ *     forecast); refreshed every 10 min while ok, every minute otherwise.
+ *     The slider spans them; default = the latest time <= now. A time the
+ *     user picked is kept while it is still stored.
+ *   - GET /api/ducting/grid?t=&bbox=s,w,n,e gives one time inside a box, at
+ *     a step the server coarsens to at most ~4000 cells. The box is the view
+ *     padded by 30 %, rounded outward to whole degrees and clamped
+ *     (windowBox); a drawn window that still covers the view at the same step
+ *     is reused, so panning inside it fetches nothing. Fetches are debounced
+ *     (250 ms), superseded ones aborted, answers kept in a small LRU (24
+ *     windows, cleared on a new model run). A window is drawn through the
+ *     lattice/field/LoRa code above as time index 0, without the edge line;
+ *     the previous image stays until the next one is drawn.
+ *   - A view on a world copy (centre beyond +-180) asks for the wrapped box
+ *     and draws it shifted by the copy's multiple of 360 (shiftFor).
+ *   - Deep link (#/map only): picking a time writes duct=1&ductT=<unix>
+ *     (history.replaceState, debounced), the default time removes ductT,
+ *     removing the overlay removes both. ductT is read when the overlay is
+ *     added and used when it is a stored time. map.js turns the overlay on
+ *     for duct=1.
+ *   - GET /api/ducting/links?days=<historyDays> (on add and with each meta
+ *     refresh): direct receptions beyond the radio horizon. The ones within
+ *     +-90 min of the shown time are drawn as non-interactive lines on the
+ *     line canvas (--mc-duct-link-duct when that reception's path was at
+ *     least half ducted in the model, else --mc-duct-link; dashed without
+ *     model data; the solid ones over a --mc-duct-link-casing halo). The
+ *     map click handler opens a link popup for a click
+ *     within 6 px of one before it looks up a cell. Names are node-chosen
+ *     text: textContent only.
+ *   window.MC_ductWindowBox(s, w, n, e, pad) -> { s, w, n, e, shift } or null
+ *   window.MC_ductWindowStep(box, nativeStep, maxCells) -> the server's step
+ *   window.MC_ductBoxCovers(outer, inner), window.MC_ductLru(max)
+ *   window.MC_ductTimeLabel(t, now)     -> 'time · forecast' / '· analysis, N h ago'
+ *   window.MC_ductHashTime(hash), window.MC_ductHashWith(hash, updates)
+ *   window.MC_ductLinksAt(links, t, winS) -> [{ link, recs, kind }]
+ *   window.MC_ductLinkKind(reception)   -> 'duct' | 'plain' | 'nodata'
+ *   window.MC_ductSegDist(p, a, b)      -> px from point p to segment ab
+ *   window.MC_ductLinksSummary(summary, days) -> legend sentence(s)
+ *   window.MC_ductLinkPopup(item, freqMHz) -> popup DOM (textContent only)
  */
 (function () {
   'use strict';
@@ -137,6 +179,37 @@
     return 'Dashed outline: the model shows a duct that may carry LoRa at ' + loraFreqs().map(function (f) { return Math.round(f * 1000) / 1000; }).join(' / ') + ' MHz';
   }
   var HOUR_S = 3600;
+
+  // Global grid mode (source "gfs-grid"). Fixed for now; candidates for the
+  // customizer later (see the PR's follow-up list).
+  var META_URL = '/api/ducting/meta';
+  var GRID_URL = '/api/ducting/grid';
+  var LINKS_URL = '/api/ducting/links';
+  var GRID_REFRESH_MS = 10 * 60 * 1000;
+  var GRID_STEP_S = 3 * HOUR_S;         // spacing of the stored times
+  var WINDOW_PAD = 0.3;                 // view padding on each side
+  var WINDOW_DEBOUNCE_MS = 250;
+  var HASH_DEBOUNCE_MS = 300;
+  var LRU_MAX = 24;
+  var GRID_MAX_CELLS = 4000;            // the server's cap per window
+  var STEP_LADDER = [1, 2, 4, 8, 16];   // x the native step (0.5 -> 0.5..8 deg)
+  var LINK_WINDOW_S = 90 * 60;          // receptions drawn within +-90 min
+  var LINK_DUCT_FRAC = 0.5;             // "during a duct": half the path or more
+  var LINK_HIT_PX = 6;
+  var LINK_MAX_RECS = 5;                // receptions listed in a link popup
+  var NAME_MAX = 64;
+  var LINK_VAR = '--mc-duct-link';
+  var LINK_DUCT_VAR = '--mc-duct-link-duct';
+  var LINK_CASING_VAR = '--mc-duct-link-casing';  // halo under the solid links: legible over any band
+  var LINK_STYLE = { stroke: true, weight: 2.5, opacity: 0.9, fill: false, interactive: false };
+  var MSG_WINDOW_ERROR = 'Could not load ducting data for this area';
+  var MSG_PAST = 'Past times show the model’s analysis or short-range forecast for that time, not measurements.';
+  var MSG_POSITIONS = 'Positions are self-reported; a long link can also come from a wrong position.';
+
+  function isGridMode() {
+    var c = (typeof window !== 'undefined' && window.MC_DUCTING_CFG) || null;
+    return !!(c && c.source === 'gfs-grid');
+  }
 
   // ── Pure helpers ──────────────────────────────────────────────────────────
 
@@ -309,8 +382,11 @@
   // { step, i0, j0, rows, cols, slot (cell index -> lattice slot, -1 = none),
   //   cell (lattice slot -> cell index, -1 = none),
   //   south, west, north, east (outer cell edges), w, h (image px) }, or null.
-  function ductGrid(cells, step) {
+  // shift (degrees, a multiple of 360; default 0) moves every cell east by
+  // that much: a window drawn on a world copy.
+  function ductGrid(cells, step, shift) {
     step = Number(step);
+    shift = Number(shift) || 0;
     if (!(step > 0) || !Array.isArray(cells)) return null;
     var slot = new Int32Array(cells.length).fill(-1);
     var ii = new Int32Array(cells.length), jj = new Int32Array(cells.length);
@@ -321,7 +397,7 @@
       var any = false;
       for (var t = 0; t < cell.c.length; t++) if (cell.c[t] >= 1) { any = true; break; }
       if (!any) continue;
-      var i = Math.round(cell.lat / step - 0.5), j = Math.round(cell.lon / step - 0.5);
+      var i = Math.round(cell.lat / step - 0.5), j = Math.round((cell.lon + shift) / step - 0.5);
       ii[k] = i; jj[k] = j; slot[k] = 0; n++;
       if (i < i0) i0 = i; if (i > i1) i1 = i;
       if (j < j0) j0 = j; if (j > j1) j1 = j;
@@ -352,12 +428,14 @@
   }
 
   // The cell (index into the cells) whose square [i*step, (i+1)*step) x
-  // [j*step, (j+1)*step) contains (lat, lon), or -1. Longitude is wrapped to
-  // -180..180 first (a click on a world copy). O(1).
+  // [j*step, (j+1)*step) contains (lat, lon), or -1. Longitude is wrapped
+  // into the 360 degrees east of the lattice's west edge first (a click on a
+  // world copy; for a lattice at -180..180 that is the usual -180..180). O(1).
   function ductCellAt(grid, lat, lon) {
     lat = Number(lat); lon = Number(lon);
     if (!grid || !grid.cell || !isFinite(lat) || !isFinite(lon)) return -1;
-    lon = ((lon + 180) % 360 + 360) % 360 - 180;
+    var w0 = Number(grid.west) || 0;
+    lon = ((lon - w0) % 360 + 360) % 360 + w0;
     var i = Math.floor(lat / grid.step) - grid.i0, j = Math.floor(lon / grid.step) - grid.j0;
     if (i < 0 || i >= grid.rows || j < 0 || j >= grid.cols) return -1;
     return grid.cell[i * grid.cols + j];
@@ -626,6 +704,247 @@
     return out;
   }
 
+  // ── Global grid mode: pure helpers ───────────────────────────────────────
+
+  function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+  // setTimeout, or run now where there is none.
+  function later(fn, ms) {
+    if (typeof setTimeout === 'function') return setTimeout(fn, ms);
+    fn();
+    return null;
+  }
+
+  // The world copy a view is on: the multiple of 360 nearest its centre
+  // longitude (0 for a view centred within -180..180).
+  function shiftFor(west, east) {
+    var s = Math.round((Number(west) + Number(east)) / 2 / 360) * 360;
+    return isFinite(s) ? s + 0 : 0;      // + 0: no -0
+  }
+
+  // The box to ask /api/ducting/grid for: the view (south, west, north,
+  // east, as Leaflet gives them; longitudes may be on a world copy) padded
+  // by `pad` of its size on each side, moved to the -180..180 copy, rounded
+  // outward to whole degrees and clamped to [-90, 90] x [-180, 180]; the
+  // whole longitude range when the padded view spans 360 degrees or more.
+  // { s, w, n, e, shift } (shift = what was taken off the longitudes), or
+  // null for a bad or empty view.
+  function windowBox(south, west, north, east, pad) {
+    south = Number(south); west = Number(west); north = Number(north); east = Number(east);
+    if (!isFinite(south) || !isFinite(west) || !isFinite(north) || !isFinite(east) || !(north > south) || !(east > west)) return null;
+    pad = pad == null ? WINDOW_PAD : Number(pad);
+    if (!(pad >= 0)) pad = 0;
+    var dLat = (north - south) * pad, dLon = (east - west) * pad, shift = shiftFor(west, east);
+    var s = clamp(Math.floor(south - dLat), -90, 90), n = clamp(Math.ceil(north + dLat), -90, 90);
+    var w = -180, e = 180;
+    if (east - west + 2 * dLon < 360) {
+      w = clamp(Math.floor(west - dLon - shift), -180, 180);
+      e = clamp(Math.ceil(east + dLon - shift), -180, 180);
+    }
+    if (!(n > s) || !(e > w)) return null;
+    return { s: s + 0, w: w + 0, n: n + 0, e: e + 0, shift: shift };
+  }
+
+  // The step the server answers box with: the finest of the ladder (x the
+  // native step) that gives at most maxCells cells, else the coarsest
+  // (ducting.Window / windowShape). Only used to tell whether a drawn window
+  // can serve a new view at the same detail.
+  function windowStep(box, native, maxCells) {
+    native = Number(native) > 0 ? Number(native) : 0.5;
+    maxCells = maxCells || GRID_MAX_CELLS;
+    var st = native;
+    for (var k = 0; k < STEP_LADDER.length; k++) {
+      st = STEP_LADDER[k] * native;
+      var rows = Math.min(Math.ceil(box.n / st), Math.ceil(90 / st)) - Math.max(Math.floor(box.s / st), Math.floor(-90 / st));
+      var cols = Math.min(Math.ceil(box.e / st) - Math.floor(box.w / st), Math.max(1, Math.floor(360 / st + 1e-9)));
+      if (rows * cols <= maxCells) return st;
+    }
+    return st;
+  }
+
+  function boxCovers(outer, inner) {
+    return !!(outer && inner) && outer.s <= inner.s && outer.n >= inner.n && outer.w <= inner.w && outer.e >= inner.e;
+  }
+
+  // Least-recently-used map of at most `max` entries.
+  function Lru(max) { this.max = max > 0 ? max : 1; this.map = new Map(); }
+  Lru.prototype.get = function (k) {
+    if (!this.map.has(k)) return undefined;
+    var v = this.map.get(k);
+    this.map.delete(k);
+    this.map.set(k, v);
+    return v;
+  };
+  Lru.prototype.set = function (k, v) {
+    this.map.delete(k);
+    this.map.set(k, v);
+    while (this.map.size > this.max) this.map.delete(this.map.keys().next().value);
+  };
+  Lru.prototype.has = function (k) { return this.map.has(k); };
+  Lru.prototype.clear = function () { this.map.clear(); };
+  Object.defineProperty(Lru.prototype, 'size', { get: function () { return this.map.size; } });
+
+  // 'Fri, Nov 20, 14:00 · forecast' after now; '… · analysis, 6 h ago' (or
+  // '3 d ago' from 48 h) at or before it. The past steps are what the model
+  // made of that time (analysis or a short forecast), not observations.
+  function timeLabel(t, nowSec) {
+    var s = fmtTime(t) + ' · ';
+    if (t > nowSec) return s + 'forecast';
+    var h = Math.round((nowSec - t) / HOUR_S);
+    if (h < 1) return s + 'analysis, under 1 h ago';
+    return s + 'analysis, ' + (h < 48 ? h + ' h' : Math.round(h / 24) + ' d') + ' ago';
+  }
+
+  // The deep-linked time: ductT of a #/map hash (whole seconds), else null.
+  function hashTime(hash) {
+    var U = (typeof window !== 'undefined' && window.URLState) || null;
+    if (!U) return null;
+    var p = U.parseHash(hash);
+    if (p.route !== 'map') return null;
+    var v = p.params.ductT;
+    return (typeof v === 'string' && /^\d{1,12}$/.test(v)) ? Number(v) : null;
+  }
+
+  // `hash` with `updates` applied (null / '' removes a key); null when the
+  // hash is not the map page's, so nothing is written elsewhere.
+  function hashWith(hash, updates) {
+    var U = (typeof window !== 'undefined' && window.URLState) || null;
+    if (!U || U.parseHash(hash).route !== 'map') return null;
+    return U.updateHashParams(updates, hash);
+  }
+
+  // 'duct' when a reception's path was at least half ducted in the model,
+  // 'plain' when less, 'nodata' without a stored step (-1) or a value.
+  function linkKind(r) {
+    var f = r && r.ductFrac != null ? Number(r.ductFrac) : NaN;
+    if (!(f >= 0)) return 'nodata';
+    return f >= LINK_DUCT_FRAC ? 'duct' : 'plain';
+  }
+
+  function endOk(e) {
+    if (!e) return false;
+    var lat = Number(e.lat), lon = Number(e.lon);
+    return isFinite(lat) && isFinite(lon) && lat >= -90 && lat <= 90;
+  }
+
+  // The links with a reception within winS seconds of t: [{ link, recs (the
+  // receptions in the window, nearest first), kind (of the nearest) }].
+  // O(links x receptions); the server caps both (500 x 50).
+  function linksAt(links, t, winS) {
+    var out = [];
+    t = Number(t);
+    if (!Array.isArray(links) || !isFinite(t)) return out;
+    winS = winS == null ? LINK_WINDOW_S : Number(winS);
+    for (var i = 0; i < links.length; i++) {
+      var L0 = links[i];
+      if (!L0 || !endOk(L0.a) || !endOk(L0.b) || !Array.isArray(L0.receptions)) continue;
+      var near = [];
+      for (var k = 0; k < L0.receptions.length; k++) {
+        var r = L0.receptions[k];
+        if (r && isFinite(Number(r.t)) && Math.abs(Number(r.t) - t) <= winS) near.push(r);
+      }
+      if (!near.length) continue;
+      near.sort(function (x, y) { return (Math.abs(x.t - t) - Math.abs(y.t - t)) || (x.t - y.t); });
+      out.push({ link: L0, recs: near, kind: linkKind(near[0]) });
+    }
+    return out;
+  }
+
+  // [[latA, lonA], [latB, lonB]] moved east by shift, B on the side of the
+  // antimeridian nearest A (a link across it is not drawn round the world).
+  function linkLatLngs(link, shift) {
+    var la = Number(link.a.lon), lb = Number(link.b.lon);
+    lb += Math.round((la - lb) / 360) * 360;
+    shift = shift || 0;
+    return [[Number(link.a.lat), la + shift], [Number(link.b.lat), lb + shift]];
+  }
+
+  // Distance in px from point p to segment ab ({ x, y } each).
+  function segDist(p, a, b) {
+    var dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+    var u = l2 > 0 ? clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / l2, 0, 1) : 0;
+    var x = a.x + u * dx - p.x, y = a.y + u * dy - p.y;
+    return Math.sqrt(x * x + y * y);
+  }
+
+  function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
+
+  function int0(v) { v = Math.round(Number(v)); return isFinite(v) && v > 0 ? v : 0; }
+
+  // The legend's period summary: only what the numbers say. The duct share
+  // is left out without receptions that have model data; the comparison
+  // with the same paths overall without a baseline (-1).
+  function linksSummary(sum, days) {
+    if (!sum) return '';
+    days = int0(days);
+    var period = days === 1 ? 'Last 24 hours' : days ? 'Last ' + days + ' days' : 'Recently';
+    var rec = int0(sum.receptions), pairs = int0(sum.links), wg = int0(sum.withGrid), dd = int0(sum.duringDuct);
+    var base = Number(sum.baselineDuctFrac);
+    if (!rec) return period + ': no direct receptions beyond the radio horizon.';
+    var s = period + ': ' + plural(rec, 'direct reception') + ' beyond the radio horizon on ' + plural(pairs, 'node pair') + '.';
+    if (!wg) return s;
+    var share = Math.round(Math.min(dd, wg) / wg * 100) + '%';
+    s += ' ' + (wg < rec ? 'Of the ' + wg + ' with model data, ' + share : share) + ' were during a modelled duct along the path';
+    return s + (base >= 0 && base <= 1 ? '; the same paths were ducted ' + Math.round(base * 100) + '% of the time overall.' : '.');
+  }
+
+  // A node's name for display (plain text, capped), else its key prefix.
+  function nodeName(e) {
+    var n = e && typeof e.name === 'string' ? e.name.trim() : '';
+    if (n) return n.length > NAME_MAX ? n.slice(0, NAME_MAX - 1) + '…' : n;
+    var k = e && typeof e.pubkey === 'string' ? e.pubkey.slice(0, 8) : '';
+    return k ? k + '…' : 'Unnamed node';
+  }
+
+  function fmtKm(v) { v = Number(v); return isFinite(v) ? Math.round(v) + ' km' : '?'; }
+
+  function fmtHeight(e) {
+    var h = Number(e && e.heightM);
+    return (isFinite(h) ? Math.round(h) + ' m' : '?') + (e && e.heightKnown ? '' : ' (site default)');
+  }
+
+  function fmtNum(v, digits) {
+    var s = Number(v).toFixed(digits);
+    return s.charAt(0) === '-' ? MINUS + s.slice(1) : s;
+  }
+
+  function recLine(r) {
+    var parts = [fmtTime(Number(r.t))];
+    if (r.snr != null && isFinite(Number(r.snr))) parts.push('SNR ' + fmtNum(r.snr, 1) + ' dB');
+    if (r.rssi != null && isFinite(Number(r.rssi))) parts.push('RSSI ' + fmtNum(r.rssi, 0) + ' dBm');
+    var f = Number(r.ductFrac);
+    if (r.ductFrac != null && f >= 0) {
+      var t = 'modelled duct along ' + Math.round(f * 100) + '% of the path';
+      var sf = Number(r.superFrac);
+      if (r.superFrac != null && sf > 0) t += ', super-refraction along ' + Math.round(sf * 100) + '%';
+      parts.push(t);
+    } else parts.push('no model data for this time');
+    return parts.join(' · ');
+  }
+
+  // Popup body of a drawn link (DOM, textContent only: names are chosen by
+  // whoever runs the node).
+  function linkPopupContent(item, freqMHz) {
+    var L0 = item.link, box = el('div', 'mc-duct-popup mc-duct-link-popup');
+    box.appendChild(el('div', 'mc-duct-popup-title', 'Long link, heard directly'));
+    box.appendChild(el('div', 'mc-duct-link-end', 'Sent by: ' + nodeName(L0.a)));
+    box.appendChild(el('div', 'mc-duct-link-end', 'Heard by: ' + nodeName(L0.b)));
+    box.appendChild(el('div', null, fmtKm(L0.distKm) + ' apart; radio horizon ' + fmtKm(L0.horizonKm)));
+    box.appendChild(el('div', null, 'Antenna heights: sender ' + fmtHeight(L0.a) + ', receiver ' + fmtHeight(L0.b)));
+    box.appendChild(el('div', 'mc-duct-popup-sub', 'Heard near the selected time:'));
+    var list = el('ul', 'mc-duct-link-recs');
+    for (var i = 0; i < item.recs.length && i < LINK_MAX_RECS; i++) list.appendChild(el('li', null, recLine(item.recs[i])));
+    box.appendChild(list);
+    var count = int0(L0.count);
+    if (count) box.appendChild(el('div', 'mc-duct-popup-note', 'Heard ' + plural(count, 'time') + ' in the period'));
+    var f = Number(freqMHz);
+    box.appendChild(el('div', 'mc-duct-popup-note', 'Duct share: path points where the model shows a duct that can carry ' +
+      (f > 0 ? fmtMHz(f) : 'LoRa') + '.'));
+    return box;
+  }
+
+  function linkId(link) { return String(link.a && link.a.pubkey) + '>' + String(link.b && link.b.pubkey); }
+
   // ── Layer ─────────────────────────────────────────────────────────────────
 
   // Leaflet 1.9.4's canvas _updatePaths (run on every map move) redraws at
@@ -713,11 +1032,20 @@
         this._timer = null;
         this._idx = -1;
         this._userPicked = false;
+        // Grid mode (kept across remove/re-add like _data):
+        this._meta = null;         // /api/ducting/meta answer held
+        this._sel = -1;            // index into _meta.times shown
+        this._links = null;        // /api/ducting/links answer held
+        this._linksState = 'loading';
+        this._lru = new Lru(LRU_MAX);
+        this._dataKey = '';        // key and box of the window in _data
+        this._dataBox = null;
       },
 
       onAdd: function (map) {
         this._map = map;
         var gen = ++this._gen;
+        this._gridMode = isGridMode();
         this._cells = [];
         this._edge = this._lora = null;
         this._edgeColor = this._loraKey = '';
@@ -731,15 +1059,21 @@
         this._addControls(map);
         this._watchAttribution(map);
         this._watchClicks(map, gen);
-        // Kept data is drawn at once, so a re-add never shows a blank map while
-        // the refetch is pending or failing; the refetch below replaces it.
-        if (this._data) this._show();
-        else this._renderLegend();
-        this._load(gen);
-        this._schedule(REFRESH_MS);
+        if (this._gridMode) this._addGrid(map, gen);
+        else {
+          // Kept data is drawn at once, so a re-add never shows a blank map while
+          // the refetch is pending or failing; the refetch below replaces it.
+          if (this._data) this._show();
+          else this._renderLegend();
+          this._load(gen);
+          this._schedule(REFRESH_MS);
+        }
         var self = this;
         // Colours are read from CSS variables, so a theme switch needs a redraw.
-        this._onTheme = function () { if (self._data) self._restyle(); };
+        this._onTheme = function () {
+          if (self._data) self._restyle();
+          if (self._gridMode) self._drawLinks();
+        };
         try { window.addEventListener('theme-changed', this._onTheme); } catch (_) {}
       },
 
@@ -755,6 +1089,7 @@
         }
         this._unwatchAttribution(m);
         this._unwatchClicks(m);
+        if (this._gridMode) this._removeGrid(m);
         if (this._legendCtl) { try { this._legendCtl.remove(); } catch (_) {} }
         if (this._timeCtl) { try { this._timeCtl.remove(); } catch (_) {} }
         if (this._group && m) { try { m.removeLayer(this._group); } catch (_) {} }
@@ -791,7 +1126,7 @@
           var latlng = e.latlng;
           Promise.resolve().then(function () {
             if (gen !== self._gen || changes !== since) return;
-            self.openCellPopup(latlng);
+            if (!self.openLinkPopup(latlng)) self.openCellPopup(latlng);
           });
         };
         try {
@@ -857,7 +1192,7 @@
           var timeCtl = new L.Control({ position: 'bottomleft' });
           timeCtl.onAdd = function () {
             var box = el('div', 'mc-duct-time');
-            var label = el('label', 'mc-duct-time-label', 'Forecast time');
+            var label = el('label', 'mc-duct-time-label', self._gridMode ? 'Time' : 'Forecast time');
             label.setAttribute('for', 'mc-duct-time-input');
             var slider = el('input');
             slider.type = 'range';
@@ -867,10 +1202,12 @@
             slider.step = '1';
             slider.value = '0';
             slider.disabled = true;
-            slider.setAttribute('aria-label', 'Ducting forecast time');
+            slider.setAttribute('aria-label', self._gridMode ? 'Ducting map time' : 'Ducting forecast time');
             self._onSlide = function () {
               var i = parseInt(slider.value, 10);
-              if (isFinite(i)) { self._userPicked = true; self._setIndex(i); }
+              if (!isFinite(i)) return;
+              if (self._gridMode) self._pickTime(i);
+              else { self._userPicked = true; self._setIndex(i); }
             };
             slider.addEventListener('input', self._onSlide);
             box.appendChild(label);
@@ -957,15 +1294,18 @@
         head.setAttribute('aria-expanded', this._legendOpen ? 'true' : 'false');
         head.addEventListener('click', function () { self._legendOpen = !self._legendOpen; self._renderLegend(); });
         box.appendChild(head);
+        this._linkCountEl = null;
         if (!this._legendOpen) return;
-        var d = this._data;
+        var grid = this._gridMode;
+        // Grid mode: the meta answer is what is "held"; windows come and go.
+        var d = grid ? this._meta : this._data;
         if (!d) {
           var st = el('div', 'mc-duct-legend-status', this._state === 'pending' ? MSG_PENDING : this._state === 'error' ? MSG_ERROR : 'Loading ducting forecast');
           st.setAttribute('role', 'status');
           box.appendChild(st);
         } else {
-          if (this._stale) {
-            var old = el('div', 'mc-duct-legend-status', MSG_STALE);
+          if (this._stale || (grid && this._winErr)) {
+            var old = el('div', 'mc-duct-legend-status', this._stale ? MSG_STALE : MSG_WINDOW_ERROR);
             old.setAttribute('role', 'status');
             box.appendChild(old);
           }
@@ -974,15 +1314,60 @@
           lrow.appendChild(el('span', 'mc-duct-swatch mc-duct-swatch-lora'));
           lrow.appendChild(el('span', null, msgLoraRow()));
           box.appendChild(lrow);
-          var erow = el('div', 'mc-duct-legend-row');
-          erow.appendChild(el('span', 'mc-duct-swatch mc-duct-swatch-edge'));
-          erow.appendChild(el('span', null, 'Dotted line: edge of the forecast area (no forecast beyond it)'));
-          box.appendChild(erow);
+          if (grid) {
+            // Global coverage: no forecast-area edge to explain.
+            box.appendChild(el('div', 'mc-duct-legend-note', MSG_PAST));
+            box.appendChild(this._linksLegend());
+          } else {
+            var erow = el('div', 'mc-duct-legend-row');
+            erow.appendChild(el('span', 'mc-duct-swatch mc-duct-swatch-edge'));
+            erow.appendChild(el('span', null, 'Dotted line: edge of the forecast area (no forecast beyond it)'));
+            box.appendChild(erow);
+          }
           var meta = d.attribution || d.modelLabel || d.model || '';
           if (meta) box.appendChild(el('div', 'mc-duct-legend-meta', meta));
           if (d.generatedAt) box.appendChild(el('div', 'mc-duct-legend-meta', 'Updated ' + fmtTime(d.generatedAt)));
         }
         box.appendChild(el('div', 'mc-duct-legend-note', NOTE));
+      },
+
+      // "Observed long links": the line key, the period summary, how many
+      // are drawn at the shown time (kept in _linkCountEl, updated in place
+      // when the time moves) and the caveat about positions.
+      _linksLegend: function () {
+        var sec = el('div', 'mc-duct-links');
+        sec.appendChild(el('div', 'mc-duct-legend-subtitle', 'Observed long links'));
+        var ld = this._links;
+        if (!ld) {
+          sec.appendChild(el('div', 'mc-duct-legend-meta', this._linksState === 'loading' ? 'Loading long links' : 'Long links are not available right now'));
+          return sec;
+        }
+        var rows = [
+          ['mc-duct-swatch-link-duct', 'Heard during a modelled duct along at least half the path'],
+          ['mc-duct-swatch-link', 'Heard with less or no modelled duct'],
+          ['mc-duct-swatch-link-nodata', 'Dashed: no model data for that time']
+        ];
+        for (var i = 0; i < rows.length; i++) {
+          var r = el('div', 'mc-duct-legend-row');
+          r.appendChild(el('span', 'mc-duct-swatch-line ' + rows[i][0]));
+          r.appendChild(el('span', null, rows[i][1]));
+          sec.appendChild(r);
+        }
+        sec.appendChild(el('div', 'mc-duct-links-summary', linksSummary(ld.summary, ld.days)));
+        this._linkCountEl = el('div', 'mc-duct-legend-meta');
+        this._linkCountEl.setAttribute('aria-live', 'polite');
+        this._updateLinkCount();
+        sec.appendChild(this._linkCountEl);
+        sec.appendChild(el('div', 'mc-duct-legend-note', MSG_POSITIONS));
+        return sec;
+      },
+
+      _updateLinkCount: function () {
+        var c = this._linkCountEl;
+        if (!c) return;
+        var n = this._shownLinks ? this._shownLinks.length : 0;
+        c.textContent = n ? 'On the map: ' + plural(n, 'link') + ' heard within 90 min of the selected time. Click one for details.'
+          : 'None heard within 90 min of the selected time.';
       },
 
       // Bar of the same colour bands as the field (hard stops: each colour
@@ -1017,6 +1402,7 @@
       _load: function (gen) {
         var self = this;
         if (gen !== this._gen) return;
+        if (this._gridMode) { this._loadMeta(gen); this._loadLinks(gen); return; }
         var opts = { headers: { Accept: 'application/json' } };
         if (typeof AbortController === 'function') {
           if (this._abort) { try { this._abort.abort(); } catch (_) {} }
@@ -1064,8 +1450,9 @@
 
       // The held forecast has run out: its last hour has ended.
       _expired: function () {
-        var t = this._data && this._data.times;
-        return !!(t && t.length && Number(t[t.length - 1]) + HOUR_S <= Date.now() / 1000);
+        var t = this._gridMode ? (this._meta && this._meta.times) : (this._data && this._data.times);
+        var span = this._gridMode ? GRID_STEP_S : HOUR_S;
+        return !!(t && t.length && Number(t[t.length - 1]) + span <= Date.now() / 1000);
       },
 
       // Out-of-date flag (always on once the forecast has run out); the
@@ -1128,13 +1515,15 @@
         this._cells = [];
         this._edge = this._lora = null;
         this._loraKey = '';
-        this._grid = ductGrid(d.cells, Number(d.stepDeg) || 0.5);
+        this._grid = ductGrid(d.cells, Number(d.stepDeg) || 0.5, this._gridMode ? this._winShift : 0);
         for (var i = 0; i < d.cells.length; i++) {
           var cell = d.cells[i];
           if (!cell || !Array.isArray(cell.c) || !isFinite(cell.lat) || !isFinite(cell.lon)) continue;
           for (var t = 0; t < cell.c.length; t++) if (cell.c[t] >= 1) { this._cells.push(cell); break; }
         }
-        this._buildEdge(group);
+        // A grid window's border is where the fetch stopped, not where the
+        // data ends: no edge line.
+        if (!this._gridMode) this._buildEdge(group);
       },
 
       // The forecast area's outline: one non-interactive multi-part polyline
@@ -1150,6 +1539,386 @@
           this._edge = line;
           this._edgeColor = color;
         } catch (_) { this._edge = null; }
+      },
+
+      // ── grid mode ──
+      // Held meta and window are drawn at once on a re-add (no blank map
+      // while the refetch is pending or failing); the view decides whether
+      // the held window still fits.
+      _addGrid: function (map, gen) {
+        var self = this;
+        this._winKey = '';
+        this._winShift = 0;
+        this._linksKey = '';
+        this._shownLinks = [];
+        this._winErr = false;
+        try { this._linkGroup = L.layerGroup(); map.addLayer(this._linkGroup); } catch (_) { this._linkGroup = null; }
+        try { this._wantT = hashTime(location.hash); } catch (_) { this._wantT = null; }
+        this._onView = function () {
+          if (gen !== self._gen) return;
+          self._queueWindow();
+          self._drawLinks();
+        };
+        try { map.on('moveend zoomend', this._onView); } catch (_) {}
+        if (this._data && this._dataBox) this._applyWindow(this._data, this._dataKey, this._dataBox);
+        if (this._meta) this._showMeta(null);
+        else this._renderLegend();
+        this._load(gen);
+        this._schedule(this._meta ? GRID_REFRESH_MS : RETRY_MS);
+      },
+
+      _removeGrid: function (map) {
+        if (map && this._onView) { try { map.off('moveend zoomend', this._onView); } catch (_) {} }
+        this._onView = null;
+        this._cancelWindowTimer();
+        if (this._hashTimer != null) { try { clearTimeout(this._hashTimer); } catch (_) {} this._hashTimer = null; }
+        if (this._winAbort) { try { this._winAbort.abort(); } catch (_) {} this._winAbort = null; }
+        if (this._linksAbort) { try { this._linksAbort.abort(); } catch (_) {} this._linksAbort = null; }
+        this._winFetchKey = this._wantKey = '';
+        if (map && this._linkPopup) { try { map.closePopup(this._linkPopup); } catch (_) {} }
+        if (map && this._linkGroup) { try { map.removeLayer(this._linkGroup); } catch (_) {} }
+        this._linkGroup = this._linkPopup = this._linkPopupId = null;
+        this._shownLinks = [];
+        this._linksKey = this._winKey = '';
+        // Unticking the overlay takes it out of the link too (a no-op off
+        // the map page: hashWith answers null there).
+        this._replaceHash({ duct: null, ductT: null });
+      },
+
+      // A JSON GET through CSApi; ctrl = an AbortController or null.
+      _getJson: function (url, ctrl) {
+        var opts = { headers: { Accept: 'application/json' } };
+        if (ctrl) opts.signal = ctrl.signal;
+        try {
+          return CSApi.fetch(url, opts).then(function (r) {
+            if (!r || r.ok === false) throw new Error('http');
+            return r.json();
+          });
+        } catch (_) { return Promise.reject(new Error('fetch')); }
+      },
+
+      _loadMeta: function (gen) {
+        var self = this, ctrl = null;
+        if (typeof AbortController === 'function') {
+          if (this._abort) { try { this._abort.abort(); } catch (_) {} }
+          ctrl = this._abort = new AbortController();
+        }
+        this._getJson(META_URL, ctrl).then(function (m) {
+          if (gen !== self._gen) return;
+          self._applyMeta(m);
+        }, function () {
+          if (gen !== self._gen || (ctrl && ctrl.signal.aborted)) return;
+          self._failMeta('error');
+        });
+      },
+
+      // Same rules as the Open-Meteo _fail: with times held they stay
+      // usable; an error or failed request marks them out of date, pending
+      // does not. Either way ask again every minute.
+      _failMeta: function (state) {
+        this._schedule(RETRY_MS);
+        if (this._meta) { this._setStale(state === 'error' || this._stale); return; }
+        this._state = state;
+        this._renderLegend();
+      },
+
+      _applyMeta: function (m) {
+        if (!m || typeof m !== 'object') return this._failMeta('error');
+        if (m.status === 'pending') return this._failMeta('pending');
+        var times = [];
+        if (Array.isArray(m.times)) {
+          for (var i = 0; i < m.times.length; i++) {
+            var t = Number(m.times[i]);
+            if (isFinite(t) && (!times.length || t > times[times.length - 1])) times.push(t);
+          }
+        }
+        if (m.status !== 'ok' || !times.length) return this._failMeta('error');
+        this._state = 'ok';
+        this._schedule(GRID_REFRESH_MS);
+        var held = this._meta, prevT = (held && this._sel >= 0) ? held.times[this._sel] : null;
+        var run = String(m.generatedAt) + '|' + String(m.runTime);
+        if (held && held._run !== run) {
+          // A new model run replaces forecast steps: cached windows and the
+          // drawn one may be old. The drawn image stays until the refetch.
+          this._lru.clear();
+          this._winKey = '';
+          this._dataKey = '';
+        }
+        this._meta = { times: times, attribution: m.attribution, modelLabel: m.modelLabel, model: m.model,
+          generatedAt: m.generatedAt, runTime: m.runTime, nativeStepDeg: Number(m.nativeStepDeg) || 0.5,
+          historyDays: m.historyDays, _run: run };
+        this._stale = false;
+        this._stale = this._expired();
+        this._showMeta(prevT);
+      },
+
+      // Slider range, legend and the shown time: the deep-linked one on the
+      // first answer that has it, else a user-picked one still stored, else
+      // the latest <= now.
+      _showMeta: function (prevT) {
+        var times = this._meta.times, idx = ductTimeIndex(times, Date.now() / 1000);
+        if (prevT == null && this._sel >= 0 && this._shownT != null) prevT = this._shownT;
+        if (this._wantT != null) {
+          var w = times.indexOf(this._wantT);
+          this._wantT = null;
+          if (w >= 0) { idx = w; this._userPicked = true; }
+        } else if (this._userPicked) {
+          var k = prevT != null ? times.indexOf(prevT) : -1;
+          if (k >= 0) idx = k; else this._userPicked = false;
+        }
+        if (this._slider) {
+          this._slider.max = String(times.length - 1);
+          this._slider.disabled = times.length < 2;
+        }
+        this._renderLegend();
+        this._setTime(idx);
+      },
+
+      // The user moved the slider: back on the default time it follows "now"
+      // again and leaves the link; any other time is kept and linked.
+      _pickTime: function (i) {
+        var m = this._meta;
+        if (!m || i < 0 || i >= m.times.length) return;
+        this._userPicked = i !== ductTimeIndex(m.times, Date.now() / 1000);
+        this._setTime(i);
+        var self = this;
+        if (this._hashTimer != null) { try { clearTimeout(this._hashTimer); } catch (_) {} }
+        this._hashTimer = later(function () {
+          self._hashTimer = null;
+          if (!self._map || !self._meta) return;
+          var t = self._meta.times[self._sel];
+          self._replaceHash(self._userPicked && t != null ? { duct: '1', ductT: String(t) } : { ductT: null });
+        }, HASH_DEBOUNCE_MS);
+      },
+
+      _replaceHash: function (updates) {
+        try {
+          var h = hashWith(location.hash, updates);
+          if (h != null && h !== location.hash) history.replaceState(history.state, '', h);
+        } catch (_) { /* no history: nothing to link */ }
+      },
+
+      _setTime: function (i) {
+        var m = this._meta;
+        if (!m || i < 0 || i >= m.times.length) return;
+        this._sel = i;
+        this._shownT = m.times[i];
+        var label = timeLabel(m.times[i], Date.now() / 1000);
+        if (this._slider) {
+          this._slider.value = String(i);
+          this._slider.setAttribute('aria-valuetext', label);
+        }
+        if (this._timeLabel) this._timeLabel.textContent = 'Time: ' + label;
+        this._queueWindow();
+        this._drawLinks();
+      },
+
+      // What the view needs: { t, box, key } (key = time + box, the LRU key),
+      // or null. A drawn window at the same time... or any time: the box of
+      // the drawn window is reused while it covers the view at the step the
+      // view would get, so panning inside it and scrubbing the slider ask
+      // for the same boxes (LRU and HTTP cache hits).
+      _wantWindow: function () {
+        var map = this._map, m = this._meta;
+        if (!map || !m || this._sel < 0) return null;
+        var b;
+        try { b = map.getBounds(); } catch (_) { return null; }
+        if (!b) return null;
+        var south = b.getSouth(), west = b.getWest(), north = b.getNorth(), east = b.getEast();
+        var box = windowBox(south, west, north, east, WINDOW_PAD);
+        if (!box) return null;
+        var cur = this._dataBox;
+        if (cur && cur.shift === box.shift) {
+          var view = { s: clamp(south, -90, 90), n: clamp(north, -90, 90),
+            w: clamp(west - box.shift, -180, 180), e: clamp(east - box.shift, -180, 180) };
+          if (boxCovers(cur, view) && windowStep(cur, m.nativeStepDeg) === windowStep(box, m.nativeStepDeg)) box = cur;
+        }
+        var t = m.times[this._sel];
+        return { t: t, box: box, key: t + '|' + box.s + ',' + box.w + ',' + box.n + ',' + box.e };
+      },
+
+      _cancelWindowTimer: function () {
+        if (this._winTimer != null) { try { clearTimeout(this._winTimer); } catch (_) {} }
+        this._winTimer = null;
+      },
+
+      // Shows the window the view and time need: nothing when it is drawn,
+      // at once from the LRU, else a fetch after WINDOW_DEBOUNCE_MS of quiet
+      // (one already in flight for it is awaited, not repeated).
+      _queueWindow: function () {
+        var want = this._wantWindow();
+        if (!want) return;
+        this._wantKey = want.key;
+        if (want.key === this._winKey && want.box.shift === this._winShift) { this._cancelWindowTimer(); return; }
+        var hit = this._lru.get(want.key);
+        if (hit) {
+          this._cancelWindowTimer();
+          this._applyWindow(hit, want.key, want.box);
+          return;
+        }
+        if (this._winFetchKey === want.key) { this._cancelWindowTimer(); return; }
+        this._cancelWindowTimer();
+        var self = this, gen = this._gen;
+        this._winTimer = later(function () {
+          self._winTimer = null;
+          if (gen === self._gen && self._wantKey === want.key) self._fetchWindow(gen, want);
+        }, WINDOW_DEBOUNCE_MS);
+      },
+
+      _fetchWindow: function (gen, want) {
+        var self = this, ctrl = null, b = want.box;
+        if (this._winAbort) { try { this._winAbort.abort(); } catch (_) {} }
+        if (typeof AbortController === 'function') ctrl = new AbortController();
+        this._winAbort = ctrl;
+        this._winFetchKey = want.key;
+        var url = GRID_URL + '?t=' + encodeURIComponent(String(want.t)) + '&bbox=' + [b.s, b.w, b.n, b.e].join(',');
+        var done = function () {
+          if (self._winFetchKey === want.key) { self._winFetchKey = ''; self._winAbort = null; }
+        };
+        this._getJson(url, ctrl).then(function (d) {
+          if (gen !== self._gen) return;
+          done();
+          if (!d || d.status !== 'ok' || !Array.isArray(d.cells) || !Array.isArray(d.times)) throw new Error('bad window');
+          self._lru.set(want.key, d);
+          self._setWinErr(false);
+          if (self._wantKey === want.key) self._applyWindow(d, want.key, want.box);
+        }).catch(function () {
+          if (gen !== self._gen || (ctrl && ctrl.signal.aborted)) return;
+          done();
+          if (self._wantKey === want.key) self._setWinErr(true);
+        });
+      },
+
+      _setWinErr: function (on) {
+        on = !!on;
+        if (on === !!this._winErr) return;
+        this._winErr = on;
+        this._renderLegend();
+      },
+
+      // Draws a window answer (one time: index 0) for box. The field canvas
+      // and image layer are reused, so the old image shows until this one
+      // is drawn.
+      _applyWindow: function (d, key, box) {
+        this._data = d;
+        this._dataKey = key;
+        this._dataBox = box;
+        this._winKey = key;
+        this._winShift = box.shift || 0;
+        this._idx = 0;
+        this._build();
+        this._restyle();
+        this._syncPopup();
+      },
+
+      _linkDays: function () {
+        var c = (typeof window !== 'undefined' && window.MC_DUCTING_CFG) || {};
+        var n = Math.round(Number(c.historyDays || (this._meta && this._meta.historyDays)));
+        return (n >= 1 && n <= 366) ? n : 0;
+      },
+
+      _loadLinks: function (gen) {
+        var self = this, ctrl = null, days = this._linkDays();
+        if (typeof AbortController === 'function') {
+          if (this._linksAbort) { try { this._linksAbort.abort(); } catch (_) {} }
+          ctrl = this._linksAbort = new AbortController();
+        }
+        this._getJson(LINKS_URL + (days ? '?days=' + days : ''), ctrl).then(function (d) {
+          if (gen !== self._gen) return;
+          if (d && d.status === 'ok' && Array.isArray(d.links)) {
+            self._links = d;
+            self._linksState = 'ok';
+          } else if (!self._links) self._linksState = (d && d.status === 'pending') ? 'pending' : 'error';
+          self._linksKey = '';
+          self._drawLinks();
+          self._renderLegend();
+        }, function () {
+          if (gen !== self._gen || (ctrl && ctrl.signal.aborted)) return;
+          if (!self._links) { self._linksState = 'error'; self._renderLegend(); }
+        });
+      },
+
+      // The links heard within LINK_WINDOW_S of the shown time, as up to
+      // four non-interactive multi-part polylines on the line canvas: no
+      // model data (dashed), a casing under the solid ones, the rest, the
+      // ducted ones on top. Rebuilt only when the time, the links, the
+      // colours or the world copy change.
+      _drawLinks: function () {
+        var grp = this._linkGroup;
+        if (!grp || !L.polyline) return;
+        var m = this._meta, ld = this._links, t = (m && this._sel >= 0) ? m.times[this._sel] : NaN;
+        var c1 = cssVar(LINK_VAR), c2 = cssVar(LINK_DUCT_VAR), c3 = cssVar(LINK_CASING_VAR), shift = 0;
+        try { var b = this._map.getBounds(); shift = shiftFor(b.getWest(), b.getEast()); } catch (_) { shift = 0; }
+        var key = [t, ld ? String(ld.generatedAt) + ':' + ld.links.length : '-', c1, c2, c3, shift].join('|');
+        if (key === this._linksKey) return;
+        this._linksKey = key;
+        try { grp.clearLayers(); } catch (_) {}
+        var items = (ld && t === t) ? linksAt(ld.links, t, LINK_WINDOW_S) : [];
+        var parts = { nodata: [], casing: [], plain: [], duct: [] }, shown = [];
+        for (var i = 0; i < items.length; i++) {
+          var color = items[i].kind === 'duct' ? c2 : c1;
+          if (!color) continue;                // no colour variable: not drawn, never invented
+          items[i].latlngs = linkLatLngs(items[i].link, shift);
+          parts[items[i].kind].push(items[i].latlngs);
+          if (items[i].kind !== 'nodata' && c3) parts.casing.push(items[i].latlngs);
+          shown.push(items[i]);
+        }
+        var order = ['nodata', 'casing', 'plain', 'duct'];
+        for (var k = 0; k < order.length; k++) {
+          var kind = order[k];
+          if (!parts[kind].length) continue;
+          var opts = L.extend({ renderer: this._renderer, color: kind === 'duct' ? c2 : kind === 'casing' ? c3 : c1 }, LINK_STYLE);
+          if (kind === 'nodata') opts.dashArray = '6 5';
+          if (kind === 'duct') opts.weight = 3.5;
+          if (kind === 'casing') opts.weight = 6.5;
+          try {
+            var line = L.polyline(parts[kind], opts);
+            line._mcLinks = kind;
+            grp.addLayer(line);
+          } catch (_) {}
+        }
+        this._shownLinks = shown;
+        this._updateLinkCount();
+        this._syncLinkPopup();
+      },
+
+      // Opens the popup of the drawn link nearest the click within
+      // LINK_HIT_PX; false when there is none.
+      openLinkPopup: function (latlng) {
+        var map = this._map, items = this._shownLinks;
+        if (!map || !latlng || !items || !items.length || !L.popup) return false;
+        var best = -1, bd = LINK_HIT_PX;
+        try {
+          var p = map.latLngToContainerPoint(latlng);
+          for (var k = 0; k < items.length; k++) {
+            var ll = items[k].latlngs;
+            var dist = segDist(p, map.latLngToContainerPoint(ll[0]), map.latLngToContainerPoint(ll[1]));
+            if (dist <= bd) { bd = dist; best = k; }
+          }
+        } catch (_) { return false; }
+        if (best < 0) return false;
+        try {
+          if (!this._linkPopup) this._linkPopup = L.popup({ maxWidth: 300 });
+          this._linkPopupId = linkId(items[best].link);
+          this._linkPopup.setLatLng(latlng).setContent(linkPopupContent(items[best], this._links && this._links.freqMHz)).openOn(map);
+          return true;
+        } catch (_) { return false; }
+      },
+
+      // An open link popup follows the time: new receptions while the link
+      // is still drawn, closed when it is not.
+      _syncLinkPopup: function () {
+        var p = this._linkPopup, open = false;
+        try { open = !!(p && p.isOpen()); } catch (_) { open = false; }
+        if (!open) return;
+        var items = this._shownLinks || [];
+        for (var k = 0; k < items.length; k++) {
+          if (linkId(items[k].link) === this._linkPopupId) {
+            p.setContent(linkPopupContent(items[k], this._links && this._links.freqMHz));
+            return;
+          }
+        }
+        try { this._map.closePopup(p); } catch (_) {}
       },
 
       _setIndex: function (i) {
@@ -1183,6 +1952,7 @@
         var group = this._group;
         if (!group || !L.polygon) return;
         var i = this._idx, color = cssVar(LORA_VAR), h = (Number(this._data && this._data.stepDeg) || 0.5) / 2;
+        var sh = this._gridMode ? (this._winShift || 0) : 0;
         var cells = [], rings = [], ids = [];
         if (color) {
           for (var k = 0; k < this._cells.length; k++) {
@@ -1190,7 +1960,8 @@
             if (!isLora(c, i)) continue;
             cells.push(c);
             ids.push(k);
-            rings.push([[[c.lat - h, c.lon - h], [c.lat - h, c.lon + h], [c.lat + h, c.lon + h], [c.lat + h, c.lon - h]]]);
+            var lo = c.lon + sh;
+            rings.push([[[c.lat - h, lo - h], [c.lat - h, lo + h], [c.lat + h, lo + h], [c.lat + h, lo - h]]]);
           }
         }
         var key = color + '|' + ids.join(',');
@@ -1260,4 +2031,16 @@
   window.MC_ductSample = sample;
   window.MC_ductFieldValues = fieldValues;
   window.MC_ductRowLat = rowLat;
+  window.MC_ductWindowBox = windowBox;
+  window.MC_ductWindowStep = windowStep;
+  window.MC_ductBoxCovers = boxCovers;
+  window.MC_ductLru = function (max) { return new Lru(max); };
+  window.MC_ductTimeLabel = timeLabel;
+  window.MC_ductHashTime = hashTime;
+  window.MC_ductHashWith = hashWith;
+  window.MC_ductLinksAt = linksAt;
+  window.MC_ductLinkKind = linkKind;
+  window.MC_ductSegDist = segDist;
+  window.MC_ductLinksSummary = linksSummary;
+  window.MC_ductLinkPopup = linkPopupContent;
 })();

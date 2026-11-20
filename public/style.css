@@ -5688,12 +5688,19 @@ body { touch-action: pan-y; }
 }
 
 /* Tropospheric ducting overlay (map-ducting.js). The field colour bands:
- * s1..s8 each colour the mean refractivity gradient over the lowest
- * 1.5 km, from -44 N/km (s1), -48, -54, -58, -62, -70, -80 and -90 N/km (s8)
- * down to the next stop (s8: -90 and beyond); weaker is transparent. Flat, no
- * blending; hex or rgb() only (read by JS). alpha = field opacity, the same for every band. lora = dashed outline of cells where a duct
- * may carry LoRa 868/915 MHz (lowest trapped frequency <= 868 MHz). edge =
- * dotted line around the forecast area. */
+ * s1..s8 each colour the mean refractivity gradient over the lowest 1.5 km,
+ * from -44 N/km (s1), -48, -54, -58, -62, -70, -80 and -90 N/km (s8) down to
+ * the next stop (s8: -90 and beyond); weaker than -44 is transparent. Flat,
+ * no blending; hex or rgb() only (read by JS). alpha = field opacity, the
+ * same for every band. lora = dashed outline of cells whose duct may carry
+ * LoRa: lowest trapped frequency (as shown, 2 significant figures) at most
+ * the site's LoRa frequency (los.frequencyMhz), or 915 MHz when none is set.
+ * edge = dotted line around the forecast area (Open-Meteo mode only).
+ * link / link-duct = observed long links (global grid mode): heard without /
+ * during a modelled duct along at least half the path; kept apart from the
+ * bands by lightness (dark lines in light, pale lines in dark) and from the
+ * LoRa outline by hue; link-casing = the halo under the solid ones, so they
+ * stay legible over any band or basemap. */
 :root {
   --mc-duct-s1: #8e3fd0;
   --mc-duct-s2: #3d5ee6;
@@ -5706,6 +5713,9 @@ body { touch-action: pan-y; }
   --mc-duct-alpha: 0.8;
   --mc-duct-lora: #111827;
   --mc-duct-edge: rgba(71, 85, 105, 0.85);
+  --mc-duct-link: #57534e;
+  --mc-duct-link-duct: #7c2d12;
+  --mc-duct-link-casing: rgba(255, 255, 255, 0.85);
 }
 [data-theme="dark"] {
   --mc-duct-s1: #a557f0;
@@ -5719,6 +5729,9 @@ body { touch-action: pan-y; }
   --mc-duct-alpha: 0.8;
   --mc-duct-lora: #f8fafc;
   --mc-duct-edge: rgba(148, 163, 184, 0.9);
+  --mc-duct-link: #a8a29e;
+  --mc-duct-link-duct: #ffd8a8;
+  --mc-duct-link-casing: rgba(15, 23, 42, 0.9);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -5733,6 +5746,9 @@ body { touch-action: pan-y; }
     --mc-duct-alpha: 0.8;
     --mc-duct-lora: #f8fafc;
     --mc-duct-edge: rgba(148, 163, 184, 0.9);
+    --mc-duct-link: #a8a29e;
+    --mc-duct-link-duct: #ffd8a8;
+    --mc-duct-link-casing: rgba(15, 23, 42, 0.9);
   }
 }
 .mc-duct-legend,
@@ -5805,6 +5821,18 @@ body { touch-action: pan-y; }
 .leaflet-bottom.leaflet-left .mc-duct-legend,
 .leaflet-bottom.leaflet-left .mc-duct-time { max-width: min(260px, calc(100vw - 80px)); }
 .mc-duct-popup-title { font-weight: 600; margin-bottom: 2px; }
+/* Observed long links (grid mode): legend section, line swatches, popup. */
+.mc-duct-links { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--mc-route-legend-border); }
+.mc-duct-legend-subtitle { font-weight: 600; margin-bottom: 4px; }
+.mc-duct-links-summary { margin-top: 4px; }
+.mc-duct-swatch-line { flex: none; width: 18px; height: 0; border-top: 3px solid var(--mc-duct-link); }
+.mc-duct-swatch-link-duct { border-top-color: var(--mc-duct-link-duct); border-top-width: 4px; }
+.mc-duct-swatch-link-nodata { border-top-style: dashed; }
+.mc-duct-popup-sub { margin-top: 4px; font-weight: 600; }
+.mc-duct-popup-note { margin-top: 4px; opacity: 0.8; }
+.mc-duct-link-end { overflow-wrap: anywhere; }
+.mc-duct-link-recs { margin: 2px 0 0; padding-left: 16px; }
+.mc-duct-link-recs li { margin: 2px 0; }
 
 .mc-route-marker-icon { background: transparent !important; border: none !important; }
 .mc-route-marker {

@@ -1552,6 +1552,626 @@ test('theme-changed redraws the field and outlines from the new variables, same 
   assert.strictEqual(s.stats.polys.length, polys, 'no redraw after remove');
 });
 
+// ── global grid mode (MC_DUCTING_CFG.source "gfs-grid") ────────────────────
+
+const URLSTATE = fs.readFileSync(path.join(REPO_ROOT, 'public', 'url-state.js'), 'utf8');
+const GMETA = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'tests', 'fixtures', 'ducting-grid-meta.json'), 'utf8'));
+const GWIN = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'tests', 'fixtures', 'ducting-grid-window.json'), 'utf8'));
+const GLINKS = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'tests', 'fixtures', 'ducting-links.json'), 'utf8'));
+const GT = GMETA.times[8];            // the default time at now = GT + 1 h
+const BASE_BBOX = '50,-2,54,2';       // the default view 51..53 x -1..1, padded 30 %, rounded out
+
+// A sandbox in grid mode: url-state.js, fake setTimeout (flushed by hand),
+// location/history, Node's AbortController and a Date whose now() is s.now.
+function makeGridSandbox(hash) {
+  const s = makeSandbox();
+  const ctx = s.ctx;
+  ctx.MC_DUCTING_CFG = { source: 'gfs-grid', historyDays: 7, attribution: 'Weather data: NOAA GFS (public domain)' };
+  ctx.URLSearchParams = URLSearchParams;
+  ctx.AbortController = AbortController;
+  vm.runInContext(URLSTATE, ctx);
+  s.now = GT + 3600;
+  class FakeDate extends Date {}
+  FakeDate.now = () => s.now * 1000;
+  ctx.Date = FakeDate;
+  const timeouts = [];
+  let tid = 1000;
+  ctx.setTimeout = (fn, ms) => { const id = tid++; timeouts.push({ id, fn, ms }); return id; };
+  ctx.clearTimeout = (id) => { const i = timeouts.findIndex(t => t.id === id); if (i >= 0) timeouts.splice(i, 1); };
+  s.timeouts = timeouts;
+  s.flush = () => { while (timeouts.length) timeouts.shift().fn(); };
+  s.replaced = [];
+  ctx.location = { hash: hash == null ? '#/map' : hash };
+  ctx.history = { state: null, replaceState(st, title, h) { s.replaced.push(h); ctx.location.hash = h; } };
+  s.vars['--mc-duct-link'] = '#505050';
+  s.vars['--mc-duct-link-duct'] = '#7c2d12';
+  s.vars['--mc-duct-link-casing'] = 'rgba(255, 255, 255, 0.85)';
+  return s;
+}
+
+// A map with a view box (degrees) and a flat projection: 100 px per degree.
+function makeGridMap(view) {
+  const m = makeMap();
+  m.view = Object.assign({ s: 51, w: -1, n: 53, e: 1 }, view);
+  m.getBounds = () => ({ getSouth: () => m.view.s, getWest: () => m.view.w, getNorth: () => m.view.n, getEast: () => m.view.e });
+  m.latLngToContainerPoint = (ll) => {
+    const lat = Array.isArray(ll) ? ll[0] : ll.lat, lng = Array.isArray(ll) ? ll[1] : ll.lng;
+    return { x: (lng - m.view.w) * 100, y: (m.view.n - lat) * 100 };
+  };
+  m.move = (v) => { m.view = Object.assign({}, v); m.fire('moveend'); };
+  return m;
+}
+
+const callsTo = (s, p) => s.api.calls.filter(c => c.url.indexOf(p) === 0);
+const lastCall = (s, p) => { const c = callsTo(s, p); return c[c.length - 1]; };
+const settle = async () => { await tick(); await tick(); };
+const openPopup = (s) => s.stats.popups.find(p => p.open) || null;
+const linkLines = (s) => (s.layer._linkGroup ? s.layer._linkGroup.layers : []);
+const slide = (s, i) => { s.layer._slider.value = String(i); s.layer._slider.fire('input'); };
+
+// Adds a grid-mode layer and answers meta, links and the first window
+// (each unless false; a value replaces the fixture).
+async function mountGrid(opts) {
+  opts = opts || {};
+  const s = makeGridSandbox(opts.hash);
+  if (opts.now != null) s.now = opts.now;
+  const map = makeGridMap(opts.view);
+  const layer = s.ctx.MC_createDuctingLayer({});
+  layer.onAdd(map);
+  Object.assign(s, { map, layer });
+  if (opts.meta !== false) { callsTo(s, '/api/ducting/meta')[0].ok(opts.meta || clone(GMETA)); await settle(); }
+  if (opts.links !== false) { callsTo(s, '/api/ducting/links')[0].ok(opts.links || clone(GLINKS)); await settle(); }
+  if (opts.meta !== false && opts.window !== false) {
+    s.flush();
+    lastCall(s, '/api/ducting/grid').ok(opts.window || clone(GWIN));
+    await settle();
+  }
+  return s;
+}
+
+test('grid: MC_ductWindowBox pads 30 %, rounds outward to whole degrees, clamps', () => {
+  const { ctx } = makeGridSandbox();
+  const b = (...a) => JSON.parse(JSON.stringify(ctx.MC_ductWindowBox(...a)));
+  assert.deepStrictEqual(b(51, -1, 53, 1), { s: 50, w: -2, n: 54, e: 2, shift: 0 });
+  assert.deepStrictEqual(b(51.3, -0.2, 51.7, 0.4, 0), { s: 51, w: -1, n: 52, e: 1, shift: 0 }, 'no padding: still whole degrees outward');
+  assert.deepStrictEqual(b(-80, 150, 80, 175), { s: -90, w: 142, n: 90, e: 180 - 0, shift: 0 }, 'latitude and longitude clamped');
+  assert.deepStrictEqual(b(-60, -200, 70, 200), { s: -90, w: -180, n: 90, e: 180, shift: 0 }, 'whole world');
+  assert.deepStrictEqual(b(10, -100, 20, 100), { s: 7, w: -160, n: 23, e: 160, shift: 0 }, '320 deg padded: clamped, not whole');
+  assert.deepStrictEqual(b(10, -130, 20, 130), { s: 7, w: -180, n: 23, e: 180, shift: 0 }, 'padded span over 360 -> whole range');
+  // A view on the next world copy asks for the -180..180 box and remembers the shift.
+  assert.deepStrictEqual(b(51, 359, 53, 361), { s: 50, w: -2, n: 54, e: 2, shift: 360 });
+  assert.deepStrictEqual(b(51, -721, 53, -719), { s: 50, w: -2, n: 54, e: 2, shift: -720 });
+  assert.strictEqual(ctx.MC_ductWindowBox(51, 1, 53, -1), null, 'empty view');
+  assert.strictEqual(ctx.MC_ductWindowBox(NaN, 0, 1, 1), null);
+});
+
+test('grid: MC_ductWindowStep mirrors the server ladder (<= 4000 cells); MC_ductBoxCovers', () => {
+  const { ctx } = makeGridSandbox();
+  const st = (s, w, n, e) => ctx.MC_ductWindowStep({ s, w, n, e }, 0.5);
+  assert.strictEqual(st(50, -2, 54, 2), 0.5);                 // 8 x 8 cells
+  assert.strictEqual(st(30, -30, 60, 30), 1);                 // 60 x 120 = 7200 at 0.5 -> 30 x 60 at 1
+  assert.strictEqual(st(-90, -180, 90, 180), 8, 'whole world: 4 deg is 45 x 90 = 4050 cells, too many');
+  assert.strictEqual(st(-60, -180, 60, 180), 4);
+  assert.ok(ctx.MC_ductBoxCovers({ s: 50, w: -2, n: 54, e: 2 }, { s: 51, w: -1, n: 53, e: 1 }));
+  assert.ok(ctx.MC_ductBoxCovers({ s: 50, w: -2, n: 54, e: 2 }, { s: 50, w: -2, n: 54, e: 2 }));
+  assert.ok(!ctx.MC_ductBoxCovers({ s: 50, w: -2, n: 54, e: 2 }, { s: 51, w: -1, n: 54.5, e: 1 }));
+  assert.ok(!ctx.MC_ductBoxCovers(null, { s: 0, w: 0, n: 1, e: 1 }));
+});
+
+test('grid: MC_ductLru keeps the most recently used, evicts the oldest', () => {
+  const { ctx } = makeGridSandbox();
+  const lru = ctx.MC_ductLru(3);
+  lru.set('a', 1); lru.set('b', 2); lru.set('c', 3);
+  assert.strictEqual(lru.get('a'), 1, 'a is now the newest');
+  lru.set('d', 4);
+  assert.strictEqual(lru.size, 3);
+  assert.ok(!lru.has('b'), 'b was the least recently used');
+  assert.ok(lru.has('a') && lru.has('c') && lru.has('d'));
+  lru.set('c', 30);
+  assert.strictEqual(lru.size, 3);
+  assert.strictEqual(lru.get('c'), 30);
+  assert.strictEqual(lru.get('zz'), undefined);
+  lru.clear();
+  assert.strictEqual(lru.size, 0);
+});
+
+test('grid: MC_ductTimeLabel says forecast ahead of now, analysis and how long ago before it', () => {
+  const { ctx } = makeGridSandbox();
+  const lab = (t, now) => ctx.MC_ductTimeLabel(t, now).split(' · ')[1];
+  assert.strictEqual(lab(GT + 1, GT), 'forecast');
+  assert.strictEqual(lab(GT, GT), 'analysis, under 1 h ago');
+  assert.strictEqual(lab(GT, GT + 1799), 'analysis, under 1 h ago');
+  assert.strictEqual(lab(GT, GT + 6 * 3600), 'analysis, 6 h ago');
+  assert.strictEqual(lab(GT, GT + 47 * 3600), 'analysis, 47 h ago');
+  assert.strictEqual(lab(GT, GT + 3 * 86400), 'analysis, 3 d ago');
+  assert.ok(ctx.MC_ductTimeLabel(GT, GT).indexOf(' · ') > 0, 'the time comes first');
+});
+
+test('grid: MC_ductHashTime / MC_ductHashWith read and write ductT on the map page only', () => {
+  const { ctx } = makeGridSandbox();
+  assert.strictEqual(ctx.MC_ductHashTime('#/map?ductT=' + GT), GT);
+  assert.strictEqual(ctx.MC_ductHashTime('#/map?lat=1&lon=2&ductT=' + GT + '&duct=1'), GT);
+  assert.strictEqual(ctx.MC_ductHashTime('#/live?ductT=' + GT), null, 'other pages are not read');
+  assert.strictEqual(ctx.MC_ductHashTime('#/map?ductT=12.5'), null);
+  assert.strictEqual(ctx.MC_ductHashTime('#/map?ductT=-3'), null);
+  assert.strictEqual(ctx.MC_ductHashTime('#/map?ductT=abc'), null);
+  assert.strictEqual(ctx.MC_ductHashTime('#/map'), null);
+  assert.strictEqual(ctx.MC_ductHashWith('#/map?lat=1&lon=2', { duct: '1', ductT: String(GT) }), '#/map?lat=1&lon=2&duct=1&ductT=' + GT);
+  assert.strictEqual(ctx.MC_ductHashWith('#/map?duct=1&ductT=5', { ductT: null }), '#/map?duct=1');
+  assert.strictEqual(ctx.MC_ductHashWith('#/packets?x=1', { ductT: '5' }), null, 'never written off the map page');
+});
+
+test('grid: MC_ductLinksAt keeps links heard within +-90 min, nearest reception first; MC_ductLinkKind', () => {
+  const { ctx } = makeGridSandbox();
+  const items = JSON.parse(JSON.stringify(ctx.MC_ductLinksAt(GLINKS.links, GT, 5400)));
+  assert.deepStrictEqual(items.map(i => i.link.a.pubkey + ':' + i.kind), ['aa11:duct', 'cc33:plain', 'ee55:nodata'],
+    'T+5400 s is in, T+5401 s is out');
+  assert.deepStrictEqual(clone(ctx.MC_ductLinksAt(GLINKS.links, GT - 20000, 5400).map(i => i.kind)), ['plain'], 'the other reception of aa11');
+  const two = [{ t: GT + 100, ductFrac: 0.1 }, { t: GT - 50, ductFrac: 0.9 }, { t: GT + 50, ductFrac: 0.6 }];
+  const link = { a: { lat: 1, lon: 1 }, b: { lat: 2, lon: 2 }, receptions: two };
+  const r = ctx.MC_ductLinksAt([link], GT, 5400)[0];
+  assert.deepStrictEqual(clone(r.recs.map(x => x.t)), [GT - 50, GT + 50, GT + 100], 'nearest first, earlier on a tie');
+  assert.strictEqual(r.kind, 'duct', 'the colour follows the nearest reception');
+  assert.strictEqual(ctx.MC_ductLinkKind({ ductFrac: 0.5 }), 'duct');
+  assert.strictEqual(ctx.MC_ductLinkKind({ ductFrac: 0.4999 }), 'plain');
+  assert.strictEqual(ctx.MC_ductLinkKind({ ductFrac: 0 }), 'plain');
+  assert.strictEqual(ctx.MC_ductLinkKind({ ductFrac: -1 }), 'nodata');
+  assert.strictEqual(ctx.MC_ductLinkKind({}), 'nodata');
+  const bad = [{ a: { lat: 'x', lon: 0 }, b: { lat: 1, lon: 1 }, receptions: [{ t: GT, ductFrac: 1 }] }, null, { a: {}, b: {} }];
+  assert.strictEqual(ctx.MC_ductLinksAt(bad, GT, 5400).length, 0, 'links without positions are skipped');
+});
+
+test('grid: MC_ductSegDist is the distance to the segment, clamped at its ends', () => {
+  const { ctx } = makeGridSandbox();
+  const d = ctx.MC_ductSegDist;
+  assert.strictEqual(d({ x: 5, y: 3 }, { x: 0, y: 0 }, { x: 10, y: 0 }), 3);
+  assert.strictEqual(d({ x: -4, y: 3 }, { x: 0, y: 0 }, { x: 10, y: 0 }), 5, 'past the start: distance to the end point');
+  assert.strictEqual(d({ x: 13, y: 4 }, { x: 0, y: 0 }, { x: 10, y: 0 }), 5);
+  assert.strictEqual(d({ x: 3, y: 4 }, { x: 0, y: 0 }, { x: 0, y: 0 }), 5, 'zero-length segment');
+});
+
+test('grid: MC_ductLinksSummary says only what the numbers say', () => {
+  const { ctx } = makeGridSandbox();
+  const f = ctx.MC_ductLinksSummary;
+  assert.strictEqual(f({ links: 9, receptions: 42, withGrid: 42, duringDuct: 30, baselineDuctFrac: 0.23 }, 7),
+    'Last 7 days: 42 direct receptions beyond the radio horizon on 9 node pairs. 71% were during a modelled duct along the path; the same paths were ducted 23% of the time overall.');
+  assert.strictEqual(f(GLINKS.summary, 7),
+    'Last 7 days: 6 direct receptions beyond the radio horizon on 4 node pairs. Of the 5 with model data, 40% were during a modelled duct along the path; the same paths were ducted 23% of the time overall.');
+  assert.strictEqual(f({ links: 9, receptions: 42, withGrid: 42, duringDuct: 30, baselineDuctFrac: -1 }, 7),
+    'Last 7 days: 42 direct receptions beyond the radio horizon on 9 node pairs. 71% were during a modelled duct along the path.', 'no baseline: no comparison');
+  assert.strictEqual(f({ links: 9, receptions: 42, withGrid: 0, duringDuct: 0, baselineDuctFrac: 0.2 }, 7),
+    'Last 7 days: 42 direct receptions beyond the radio horizon on 9 node pairs.', 'no model data: no share, no comparison');
+  assert.strictEqual(f({ links: 1, receptions: 1, withGrid: 0, duringDuct: 0, baselineDuctFrac: -1 }, 1),
+    'Last 24 hours: 1 direct reception beyond the radio horizon on 1 node pair.');
+  assert.strictEqual(f({ links: 0, receptions: 0, withGrid: 0, duringDuct: 0, baselineDuctFrac: -1 }, 3),
+    'Last 3 days: no direct receptions beyond the radio horizon.');
+});
+
+test('grid: link popup shows node names as text only (a hostile name stays inert), heights, receptions', () => {
+  const { ctx } = makeGridSandbox();
+  const item = ctx.MC_ductLinksAt(GLINKS.links, GT, 5400)[0];
+  const box = ctx.MC_ductLinkPopup(item, 869.525);
+  const text = box.textContent;
+  assert.ok(text.indexOf('Sent by: Hill Top') >= 0);
+  assert.ok(text.indexOf('Heard by: <img src=x onerror=alert(1)>') >= 0, 'the name is shown literally');
+  assert.strictEqual(find(box, n => /^img$/i.test(n.tagName || '')).length, 0, 'no element made from the name');
+  assert.ok(!('innerHTML' in box) || box.innerHTML === undefined);
+  assert.ok(text.indexOf('190 km apart; radio horizon 59 km') >= 0);
+  assert.ok(text.indexOf('Antenna heights: sender 12 m, receiver 10 m (site default)') >= 0);
+  assert.ok(/SNR −5\.5 dB · RSSI −118 dBm · modelled duct along 80% of the path, super-refraction along 100%/.test(text), text);
+  assert.ok(text.indexOf('Heard 3 times in the period') >= 0);
+  assert.ok(text.indexOf('a duct that can carry 869.525 MHz') >= 0);
+  // No model data, no name (key prefix), a very long name capped.
+  const nodata = ctx.MC_ductLinksAt(GLINKS.links, GT + 5400, 0)[0];
+  assert.ok(ctx.MC_ductLinkPopup(nodata, 869.525).textContent.indexOf('no model data for this time') >= 0);
+  assert.ok(ctx.MC_ductLinkPopup(nodata, 869.525).textContent.indexOf('Sent by: ee55…') >= 0);
+  const long = clone(GLINKS.links[0]);
+  long.a.name = 'x'.repeat(500);
+  const t = ctx.MC_ductLinkPopup({ link: long, recs: long.receptions, kind: 'duct' }, 0).textContent;
+  assert.ok(t.indexOf('x'.repeat(63) + '…') >= 0 && t.indexOf('x'.repeat(64)) < 0, 'name capped at 64 characters');
+});
+
+test('grid: on add fetches meta and links (historyDays), not /api/ducting; default time = latest <= now', async () => {
+  const s = await mountGrid({ window: false });
+  assert.strictEqual(callsTo(s, '/api/ducting/meta').length, 1);
+  assert.deepStrictEqual(callsTo(s, '/api/ducting/links').map(c => c.url), ['/api/ducting/links?days=7']);
+  assert.strictEqual(s.api.calls.filter(c => c.url === '/api/ducting').length, 0, 'never the Open-Meteo snapshot');
+  assert.strictEqual(s.layer._sel, 8);
+  assert.strictEqual(s.layer._slider.max, String(GMETA.times.length - 1));
+  assert.strictEqual(s.layer._slider.disabled, false);
+  assert.ok(/^Time: .* · analysis, 1 h ago$/.test(s.layer._timeLabel.textContent), s.layer._timeLabel.textContent);
+  assert.strictEqual(s.layer._slider.attrs['aria-valuetext'], s.layer._timeLabel.textContent.slice(6));
+  // Every 10 minutes while ok.
+  assert.deepStrictEqual(s.timers.map(t => t.ms), [600000]);
+});
+
+test('grid: the window for view + time is fetched once after the debounce, bbox padded and rounded', async () => {
+  const s = await mountGrid({ window: false });
+  assert.strictEqual(callsTo(s, '/api/ducting/grid').length, 0, 'debounced');
+  assert.deepStrictEqual(s.timeouts.map(t => t.ms), [250]);
+  s.map.fire('moveend'); s.map.fire('zoomend');
+  assert.strictEqual(s.timeouts.length, 1, 'rapid events coalesce');
+  s.flush();
+  assert.deepStrictEqual(callsTo(s, '/api/ducting/grid').map(c => c.url), ['/api/ducting/grid?t=' + GT + '&bbox=' + BASE_BBOX]);
+  lastCall(s, '/api/ducting/grid').ok(clone(GWIN));
+  await settle();
+  assert.ok(s.layer._field && s.map._layers.indexOf(s.layer._field) >= 0, 'field drawn');
+  assert.strictEqual(s.stats.lines.filter(l => l._mcEdge).length, 0, 'no forecast-area edge line in grid mode');
+  assert.deepStrictEqual(loraSet(s), ['52.25,0.25'], 'LoRa outline from the window');
+  assert.strictEqual(s.layer._idx, 0, 'a window holds one time');
+});
+
+test('grid: click lookup and popup work on the window lattice', async () => {
+  const s = await mountGrid();
+  click(s, 52.05, 0.45);                // the LoRa cell (52.25, 0.25), 25 px from the nearest link
+  await tick();
+  const p = openPopup(s);
+  assert.ok(p && p.content.textContent.indexOf('Surface-based duct') >= 0, p && p.content.textContent);
+  assert.ok(s.layer.openCellPopup({ lat: 52.75, lng: -0.75 }));
+  assert.ok(!s.layer.openCellPopup({ lat: 45, lng: 10 }), 'outside the window');
+});
+
+test('grid: legend has no edge row, says what past times are, and the long-link section', async () => {
+  const s = await mountGrid();
+  const t = legendText(s);
+  assert.ok(t.indexOf('edge of the forecast area') < 0, 'no edge row: coverage is global');
+  assert.ok(t.indexOf('Past times show the model’s analysis or short-range forecast for that time, not measurements.') >= 0);
+  assert.ok(t.indexOf('Observed long links') >= 0);
+  assert.ok(t.indexOf(ctxSummary()) >= 0, t);
+  assert.ok(t.indexOf('On the map: 3 links heard within 90 min of the selected time. Click one for details.') >= 0, t);
+  assert.ok(t.indexOf('Positions are self-reported; a long link can also come from a wrong position.') >= 0);
+  assert.ok(t.indexOf('Weather data: NOAA GFS (public domain)') >= 0, 'attribution from meta');
+});
+function ctxSummary() { return 'Last 7 days: 6 direct receptions beyond the radio horizon on 4 node pairs.'; }
+
+test('grid: panning inside the drawn window fetches nothing; leaving it fetches the new box', async () => {
+  const s = await mountGrid();
+  const n0 = callsTo(s, '/api/ducting/grid').length;
+  const canvasPuts = s.layer._canvas.puts;
+  s.map.move({ s: 51.4, w: -0.6, n: 53.4, e: 1.4 });
+  assert.strictEqual(s.timeouts.length, 0, 'covered at the same step: no fetch queued');
+  assert.strictEqual(s.layer._canvas.puts, canvasPuts, 'and no redraw');
+  s.map.move({ s: 40, w: 10, n: 42, e: 12 });
+  s.flush();
+  assert.strictEqual(callsTo(s, '/api/ducting/grid').length, n0 + 1);
+  assert.strictEqual(lastCall(s, '/api/ducting/grid').url, '/api/ducting/grid?t=' + GT + '&bbox=39,9,43,13');
+  // Zooming far out inside the drawn box changes the step: refetch.
+  const s2 = await mountGrid({ view: { s: 30, w: -30, n: 60, e: 30 } });
+  const before = callsTo(s2, '/api/ducting/grid').length;
+  s2.map.move({ s: 40, w: -1, n: 41, e: 0 });
+  s2.flush();
+  assert.strictEqual(callsTo(s2, '/api/ducting/grid').length, before + 1, 'zoomed in: finer step wanted');
+});
+
+test('grid: the drawn image stays while a new window loads; superseded requests are aborted', async () => {
+  const s = await mountGrid();
+  const field = s.layer._field, data = s.layer._data;
+  slide(s, 9);
+  s.flush();
+  const a = lastCall(s, '/api/ducting/grid');
+  assert.strictEqual(a.url, '/api/ducting/grid?t=' + GMETA.times[9] + '&bbox=' + BASE_BBOX, 'the drawn box is reused for a new time');
+  assert.ok(s.map._layers.indexOf(field) >= 0 && s.layer._data === data, 'old image kept while loading');
+  slide(s, 10);
+  s.flush();
+  const b = lastCall(s, '/api/ducting/grid');
+  assert.ok(a.opts.signal.aborted, 'the superseded request is aborted');
+  assert.ok(!b.opts.signal.aborted);
+  const win10 = clone(GWIN); win10.times = [GMETA.times[10]];
+  b.ok(win10);
+  await settle();
+  assert.strictEqual(s.layer._data.times[0], GMETA.times[10]);
+  assert.strictEqual(s.layer._field, field, 'same image layer, redrawn');
+});
+
+test('grid: windows come from the LRU without a request; a same-window refresh redraws nothing', async () => {
+  const s = await mountGrid();
+  slide(s, 9); s.flush();
+  const w9 = clone(GWIN); w9.times = [GMETA.times[9]];
+  lastCall(s, '/api/ducting/grid').ok(w9);
+  await settle();
+  const n = callsTo(s, '/api/ducting/grid').length;
+  slide(s, 8);
+  assert.strictEqual(s.timeouts.filter(t => t.ms === 250).length, 0, 'no fetch queued');
+  assert.strictEqual(s.layer._data.times[0], GT, 'drawn at once from the cache');
+  slide(s, 9);
+  assert.strictEqual(s.layer._data.times[0], GMETA.times[9]);
+  s.flush();
+  assert.strictEqual(callsTo(s, '/api/ducting/grid').length, n, 'no request');
+  // A meta refresh with the same run: no rebuild.
+  const puts = s.layer._canvas.puts, polys = s.stats.polys.length;
+  s.timers[0].fn();
+  lastCall(s, '/api/ducting/meta').ok(clone(GMETA));
+  await settle();
+  s.flush();
+  assert.strictEqual(s.layer._canvas.puts, puts);
+  assert.strictEqual(s.stats.polys.length, polys);
+  assert.strictEqual(callsTo(s, '/api/ducting/grid').length, n);
+});
+
+test('grid: a new model run empties the cache and refetches the shown window, keeping the image meanwhile', async () => {
+  const s = await mountGrid();
+  const n = callsTo(s, '/api/ducting/grid').length, field = s.layer._field;
+  const m = clone(GMETA); m.generatedAt += 3 * 3600; m.runTime += 6 * 3600;
+  s.timers[0].fn();
+  lastCall(s, '/api/ducting/meta').ok(m);
+  await settle();
+  assert.strictEqual(s.layer._lru.size, 0);
+  assert.ok(s.map._layers.indexOf(field) >= 0);
+  s.flush();
+  assert.strictEqual(callsTo(s, '/api/ducting/grid').length, n + 1);
+});
+
+test('grid: a user-picked time is kept across meta refreshes while stored, else back to the default', async () => {
+  const s = await mountGrid();
+  slide(s, 3);
+  const picked = GMETA.times[3];
+  const m = clone(GMETA); m.times = m.times.slice(1).concat([m.times[16] + 10800]); m.generatedAt += 1;
+  s.timers[0].fn();
+  lastCall(s, '/api/ducting/meta').ok(m);
+  await settle();
+  assert.strictEqual(s.layer._meta.times[s.layer._sel], picked, 'same time, new index');
+  assert.strictEqual(s.layer._sel, 2);
+  const m2 = clone(m); m2.times = m2.times.filter(t => t !== picked); m2.generatedAt += 1;
+  s.timers[0].fn();
+  lastCall(s, '/api/ducting/meta').ok(m2);
+  await settle();
+  assert.strictEqual(s.layer._meta.times[s.layer._sel], GT, 'pruned: back to the latest <= now');
+  assert.strictEqual(s.layer._userPicked, false);
+});
+
+test('grid: without a pick the shown time follows now on refresh', async () => {
+  const s = await mountGrid();
+  s.now = GT + 3 * 3600 + 60;
+  s.timers[0].fn();
+  lastCall(s, '/api/ducting/meta').ok(clone(GMETA));
+  await settle();
+  assert.strictEqual(s.layer._sel, 9);
+});
+
+test('grid deep link: ductT on #/map picks a stored time when added; unknown time or other page ignored', async () => {
+  const s = await mountGrid({ hash: '#/map?duct=1&ductT=' + GMETA.times[4], window: false });
+  assert.strictEqual(s.layer._sel, 4);
+  assert.strictEqual(s.layer._userPicked, true);
+  s.flush();
+  assert.ok(lastCall(s, '/api/ducting/grid').url.indexOf('t=' + GMETA.times[4] + '&') > 0);
+  const u = await mountGrid({ hash: '#/map?ductT=' + (GT + 1), window: false });
+  assert.strictEqual(u.layer._sel, 8, 'not a stored time: default');
+  const o = await mountGrid({ hash: '#/live?ductT=' + GMETA.times[4], window: false });
+  assert.strictEqual(o.layer._sel, 8);
+});
+
+test('grid deep link: picking writes duct=1&ductT (debounced), the default removes ductT, removal clears both', async () => {
+  const s = await mountGrid({ hash: '#/map?lat=52&lon=0' });
+  slide(s, 2); slide(s, 3);
+  assert.strictEqual(s.replaced.length, 0, 'debounced');
+  s.flush();
+  assert.deepStrictEqual(s.replaced, ['#/map?lat=52&lon=0&duct=1&ductT=' + GMETA.times[3]]);
+  slide(s, 8);                           // the default
+  s.flush();
+  assert.strictEqual(s.ctx.location.hash, '#/map?lat=52&lon=0&duct=1');
+  assert.strictEqual(s.layer._userPicked, false);
+  slide(s, 5); s.flush();
+  s.layer.onRemove(s.map);
+  assert.strictEqual(s.ctx.location.hash, '#/map?lat=52&lon=0', 'overlay off: out of the link');
+  // Off the map page nothing is written.
+  const o = await mountGrid({ hash: '#/live' });
+  slide(o, 3); o.flush();
+  o.layer.onRemove(o.map);
+  assert.deepStrictEqual(o.replaced, []);
+});
+
+test('grid links: drawn on the line canvas by kind (dashed without model data), filtered by time', async () => {
+  const s = await mountGrid();
+  const lines = linkLines(s);
+  assert.deepStrictEqual(lines.map(l => l._mcLinks), ['nodata', 'casing', 'plain', 'duct'], 'ducted drawn last (on top)');
+  const by = {};
+  lines.forEach(l => { by[l._mcLinks] = l; });
+  assert.strictEqual(by.duct.opts.color, '#7c2d12');
+  assert.strictEqual(by.plain.opts.color, '#505050');
+  assert.strictEqual(by.nodata.opts.color, '#505050');
+  assert.strictEqual(by.nodata.opts.dashArray, '6 5');
+  assert.ok(!by.plain.opts.dashArray && !by.duct.opts.dashArray);
+  assert.strictEqual(by.casing.opts.color, 'rgba(255, 255, 255, 0.85)');
+  assert.ok(by.casing.opts.weight > by.duct.opts.weight, 'a halo wider than the line');
+  assert.strictEqual(by.casing.latlngs.length, 2, 'under the solid links only (the dashed one keeps its gaps)');
+  lines.forEach(l => {
+    assert.strictEqual(l.opts.interactive, false);
+    assert.strictEqual(l.opts.renderer, s.layer._renderer, 'the shared line canvas');
+  });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(by.duct.latlngs)), [[[51.2, -0.5], [52.8, 0.7]]]);
+  // Another time: other links; same time again: no rebuild.
+  const made = s.stats.lines.length;
+  slide(s, 6);                          // T - 6 h: aa11's older reception (T - 20000 s)
+  assert.deepStrictEqual(linkLines(s).map(l => l._mcLinks), ['casing', 'plain']);
+  assert.ok(legendText(s).indexOf('On the map: 1 link heard within 90 min') >= 0, 'count updated in place');
+  slide(s, 6);
+  assert.strictEqual(s.stats.lines.length, made + 2, 'same time: not redrawn');
+  slide(s, 0);
+  assert.strictEqual(linkLines(s).length, 0);
+  assert.ok(legendText(s).indexOf('None heard within 90 min of the selected time.') >= 0);
+});
+
+test('grid links: no colour variable -> not drawn; theme change recolours', async () => {
+  const s = await mountGrid();
+  s.vars['--mc-duct-link-duct'] = '';
+  s.ctx.dispatch('theme-changed');
+  assert.deepStrictEqual(linkLines(s).map(l => l._mcLinks), ['nodata', 'casing', 'plain']);
+  s.vars['--mc-duct-link-casing'] = '';
+  s.ctx.dispatch('theme-changed');
+  assert.deepStrictEqual(linkLines(s).map(l => l._mcLinks), ['nodata', 'plain'], 'no casing variable: no casing');
+  s.vars['--mc-duct-link-duct'] = '#123456';
+  s.ctx.dispatch('theme-changed');
+  assert.strictEqual(linkLines(s).find(l => l._mcLinks === 'duct').opts.color, '#123456');
+});
+
+test('grid links: a click within 6 px of a drawn link opens its popup before any cell lookup', async () => {
+  const s = await mountGrid();
+  click(s, 52.0, 0.1);                  // the middle of aa11 -> bb22
+  await tick();
+  const p = openPopup(s);
+  assert.ok(p && p.content.textContent.indexOf('Long link, heard directly') >= 0);
+  assert.strictEqual(s.layer._popup, undefined, 'no cell popup made');
+  // 6 px from the line (perpendicular) still hits; 7 px does not.
+  const seg = [{ x: 50, y: 180 }, { x: 170, y: 20 }];
+  const len = Math.hypot(120, -160), nx = 160 / len, ny = 120 / len;  // unit normal
+  const at = (px) => ({ lat: 53 - (100 + ny * px) / 100, lng: -1 + (110 + nx * px) / 100 });
+  assert.ok(Math.abs(s.ctx.MC_ductSegDist({ x: 110 + nx * 6, y: 100 + ny * 6 }, seg[0], seg[1]) - 6) < 1e-9);
+  p.open = false;
+  assert.strictEqual(s.layer.openLinkPopup(at(5.9)), true);
+  p.open = false;
+  assert.strictEqual(s.layer.openLinkPopup(at(7)), false);
+  click(s, 52.75, -0.75);               // far from every link: the cell
+  await tick();
+  assert.ok(s.layer._popup && s.layer._popup.open);
+  assert.ok(s.layer._popup.content.textContent.indexOf('Normal') >= 0);
+});
+
+test('grid links: an open link popup follows the time and closes when the link is not drawn', async () => {
+  const s = await mountGrid();
+  assert.ok(s.layer.openLinkPopup({ lat: 52.0, lng: 0.1 }));
+  const p = s.layer._linkPopup;
+  slide(s, 9);                          // T + 3 h: aa11 not heard within 90 min
+  assert.strictEqual(p.open, false);
+});
+
+test('grid links: refreshed with each meta refresh; a failed refresh keeps the held links', async () => {
+  const s = await mountGrid();
+  s.timers[0].fn();
+  assert.strictEqual(callsTo(s, '/api/ducting/links').length, 2);
+  lastCall(s, '/api/ducting/meta').ok(clone(GMETA));
+  lastCall(s, '/api/ducting/links').fail();
+  await settle();
+  assert.strictEqual(linkLines(s).length, 4);
+  const e = await mountGrid({ links: { status: 'error', error: 'x' } });
+  assert.ok(legendText(e).indexOf('Long links are not available right now') >= 0);
+  assert.strictEqual(linkLines(e).length, 0);
+});
+
+test('grid: pending meta retries every minute and shows the preparing message; ok then every 10 min', async () => {
+  const s = await mountGrid({ meta: false, links: false });
+  callsTo(s, '/api/ducting/meta')[0].ok({ status: 'pending' });
+  await settle();
+  assert.ok(legendText(s).indexOf(MSG_PENDING_TEXT) >= 0);
+  assert.deepStrictEqual(s.timers.map(t => t.ms), [60000]);
+  s.timers[0].fn();
+  lastCall(s, '/api/ducting/meta').ok(clone(GMETA));
+  await settle();
+  assert.deepStrictEqual(s.timers.map(t => t.ms), [600000]);
+});
+const MSG_PENDING_TEXT = 'Ducting forecast is being prepared';
+
+test('grid: out of date on a failed meta refresh (data stays) and once the last time + 3 h has passed', async () => {
+  const s = await mountGrid();
+  s.timers[0].fn();
+  lastCall(s, '/api/ducting/meta').fail();
+  await settle();
+  assert.ok(legendText(s).indexOf('Forecast out of date') >= 0);
+  assert.ok(s.map._layers.indexOf(s.layer._field) >= 0);
+  assert.deepStrictEqual(s.timers.map(t => t.ms), [60000], 'asks again every minute');
+  const last = GMETA.times[GMETA.times.length - 1];
+  const e = await mountGrid({ now: last + 3 * 3600 - 1 });
+  assert.ok(legendText(e).indexOf('Forecast out of date') < 0, 'not before last + 3 h');
+  const x = await mountGrid({ now: last + 3 * 3600 });
+  assert.ok(legendText(x).indexOf('Forecast out of date') >= 0);
+});
+
+test('grid: a failed window keeps the previous image and says so; the next success clears it', async () => {
+  const s = await mountGrid();
+  const field = s.layer._field;
+  slide(s, 9); s.flush();
+  lastCall(s, '/api/ducting/grid').fail();
+  await settle();
+  assert.ok(legendText(s).indexOf('Could not load ducting data for this area') >= 0);
+  assert.ok(s.map._layers.indexOf(field) >= 0);
+  slide(s, 10); s.flush();
+  lastCall(s, '/api/ducting/grid').ok({ status: 'error', error: 'busy', cells: [], times: [] });
+  await settle();
+  assert.ok(legendText(s).indexOf('Could not load ducting data for this area') >= 0, 'an error answer counts as a failure');
+  slide(s, 11); s.flush();
+  const w = clone(GWIN); w.times = [GMETA.times[11]];
+  lastCall(s, '/api/ducting/grid').ok(w);
+  await settle();
+  assert.ok(legendText(s).indexOf('Could not load ducting data for this area') < 0);
+});
+
+test('grid: a view on another world copy draws the window, LoRa outline and links shifted onto it', async () => {
+  const s = await mountGrid({ view: { s: 51, w: 359, n: 53, e: 361 } });
+  assert.strictEqual(lastCall(s, '/api/ducting/grid').url, '/api/ducting/grid?t=' + GT + '&bbox=' + BASE_BBOX);
+  assert.strictEqual(s.layer._grid.west, 359);
+  const ring = loraLayer(s).latlngs[0][0];
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(ring[0])), [52, 360]);
+  const duct = linkLines(s).find(l => l._mcLinks === 'duct');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(duct.latlngs)), [[[51.2, 359.5], [52.8, 360.7]]]);
+  click(s, 52.05, 360.45);
+  await tick();
+  assert.ok(openPopup(s).content.textContent.indexOf('Surface-based duct') >= 0, 'click lookup on the copy');
+});
+
+test('grid: remove aborts fetches, clears timers, removes links; re-add draws the held window at once', async () => {
+  const s = await mountGrid();
+  slide(s, 9); s.flush();
+  const pending = lastCall(s, '/api/ducting/grid');
+  s.map.move({ s: 40, w: 10, n: 42, e: 12 });
+  const group = s.layer._linkGroup;
+  s.layer.onRemove(s.map);
+  assert.ok(pending.opts.signal.aborted);
+  assert.strictEqual(s.timers.length, 0);
+  assert.strictEqual(s.timeouts.length, 0, 'debounce timers cleared');
+  assert.ok(s.map._layers.indexOf(group) < 0);
+  s.map.move({ s: 51, w: -1, n: 53, e: 1 });
+  assert.strictEqual(s.timeouts.length, 0, 'no view listener left');
+  pending.ok(clone(GWIN));
+  await settle();
+  assert.strictEqual(s.layer._field, null, 'nothing drawn after remove');
+  const puts = s.stats.fields.length;
+  s.layer.onAdd(s.map);
+  assert.ok(s.layer._field && s.map._layers.indexOf(s.layer._field) >= 0, 'held window drawn at once');
+  assert.ok(s.stats.fields.length === puts + 1);
+  assert.deepStrictEqual(linkLines(s).map(l => l._mcLinks), ['nodata', 'casing', 'duct'], 'held links drawn at once (time T + 3 h)');
+});
+
+test('grid: Open-Meteo source keeps the old path (/api/ducting, edge line, no links)', async () => {
+  const s = makeGridSandbox();
+  s.ctx.MC_DUCTING_CFG = { source: 'open-meteo', attribution: 'a' };
+  const map = makeGridMap();
+  const layer = s.ctx.MC_createDuctingLayer({});
+  layer.onAdd(map);
+  assert.deepStrictEqual(s.api.calls.map(c => c.url), ['/api/ducting']);
+  s.api.calls[0].ok(clone(SAMPLE));
+  await settle();
+  assert.ok(s.stats.lines.some(l => l._mcEdge));
+  assert.strictEqual(layer._linkGroup, undefined);
+  assert.ok(map._controls.map(c => c._container.textContent).join('\n').indexOf('edge of the forecast area') >= 0);
+  layer._slider.value = '0'; layer._slider.fire('input');
+  s.flush();
+  assert.deepStrictEqual(s.replaced, [], 'no deep link written in Open-Meteo mode');
+});
+
+// Not a gate (wall-clock asserts are flaky in CI): prints how long one
+// field draw of a full 4000-cell window takes on this machine.
+test('grid perf: a 4000-cell window (50 x 80 at 0.5 deg) draws its field; time reported, not asserted', async () => {
+  const cells = [];
+  for (let r = 0; r < 50; r++) {
+    for (let c = 0; c < 80; c++) {
+      const n = -40 - 30 * (0.5 + 0.5 * Math.sin(r / 4) * Math.cos(c / 6));
+      cells.push({ lat: 30.25 + r * 0.5, lon: -19.75 + c * 0.5, c: [n < -79 ? 2 : 1], f: [0], b: [0], t: [0], dm: [0], g: [n], n: [Math.round(n)] });
+    }
+  }
+  const win = { status: 'ok', generatedAt: 1, stepDeg: 0.5, times: [GT], cells };
+  const s = await mountGrid({ view: { s: 36, w: -12, n: 49, e: 12 }, window: win });
+  assert.strictEqual(s.layer._data.cells.length, 4000);
+  const g = s.layer._grid;
+  s.ctx.Date = Date;                    // real clock for _fieldMs
+  const ms = [];
+  for (let k = 0; k < 7; k++) { s.layer._drawField(); ms.push(s.layer._fieldMs); }
+  ms.sort((a, b) => a - b);
+  console.log('    _drawField, 4000 cells, ' + g.w + 'x' + g.h + ' px, inside this vm sandbox (much slower than a page): median ' + ms[3] + ' ms (min ' + ms[0] + ', max ' + ms[6] + ')');
+  let colored = 0;
+  const d = s.layer._canvas.img.data;
+  for (let i = 3; i < d.length; i += 4) if (d[i]) colored++;
+  assert.ok(colored > 0, 'pixels drawn');
+});
+
 // ── overlay registry ────────────────────────────────────────────────────────
 
 function loadProviders(before) {
