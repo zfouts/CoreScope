@@ -7,17 +7,30 @@ package main
 // than the smooth-earth radio horizon, did the model show a duct along that
 // path at that time, and how often are the same paths ducted at all?
 //
-// Evidence is certain only. A reception is an observation of an ADVERT whose
-// path is empty (directHeardNode's zero-hop case: a flood with no hops, or a
-// direct-route zero-hop advert), so the observer heard the advertiser's own
-// transmission and the advert names it. Excluded: the observer's own
-// transmissions (direction "tx"), adverts whose signature failed, blacklisted
-// observers, observers that are not a known node, and either end hidden by
-// the /api/nodes visibility rule or without a position fix. Positions are the
-// nodes' current ones, never old advert payloads.
+// Evidence is certain only, from two sources:
+//
+//   - via "observer": an observation of an ADVERT whose path is empty
+//     (directHeardNode's zero-hop case: a flood with no hops, or a
+//     direct-route zero-hop advert), so the observer heard the advertiser's
+//     own transmission and the advert names it. The observer must be a node.
+//   - via "relay": consecutive hops of a flood path, each of which only one
+//     node can be (the #2260 liveness rule: the observation's path is bound
+//     to its own flood frame, relayHopHexLen, and the hop prefix resolves to
+//     exactly one path-capable node and no retired one, uniqueHopPrefix).
+//     path[i] transmitted and path[i+1] heard it; an ADVERT also gives
+//     origin -> path[0]. Direct routes carry the remaining route, never the
+//     travelled one, so they give no pairs. One reception per (transmission,
+//     pair), at the transmission's earliest observation, without SNR/RSSI
+//     (those belong to the last hop's link to the observer).
+//
+// Excluded everywhere: the observer's own transmissions (direction "tx"),
+// transmissions whose advert signature failed, blacklisted observers, and
+// either end hidden by the /api/nodes visibility rule or without a position
+// fix. Positions are the nodes' current ones, never old advert payloads.
 //
 // Cost: the candidate observations are copied under the store's read lock
-// (only the fields needed), then all grid work runs without it. Each stored
+// (only the fields needed, ductingScanChunk transmissions per hold; relay
+// hops are resolved between holds), then all grid work runs without it. Each stored
 // step is decoded at most once per rebuild through ductingStepSource.Load
 // (or LoadPlanes, which decodes only the planes sampled; never the LRU behind
 // Step), one at a time. Answers are cached per days
@@ -46,11 +59,18 @@ import (
 // with it los.frequencyMhz) is not enabled.
 const ductingLinksDefaultFreqMHz = 868.0
 
+// Reception sources (DuctingReception.Via).
+const (
+	ductingViaObserver = "observer" // zero-hop advert heard by an observer that is a node
+	ductingViaRelay    = "relay"    // consecutive certain hops of a flood path
+)
+
 // ductingLinkObs is one candidate reception, copied out of the store.
 type ductingLinkObs struct {
-	obsID int    // StoreObs.ID: the observation's identity
+	obsID int    // identity within via: StoreObs.ID (observer), StoreTx.ID (relay)
 	t     int64  // reception time, unix seconds
-	a, b  string // lowercase pubkeys: advertiser, observer node
+	a, b  string // lowercase pubkeys: transmitter, receiver
+	via   string // ductingViaObserver or ductingViaRelay
 	snr   *float64
 	rssi  *float64
 }
@@ -89,6 +109,8 @@ func ductingLinksFreq(cfg *Config) float64 {
 // rather than a stale hit.
 type ductingLinksMemoKey struct {
 	obsID              int
+	via                string
+	a, b               string
 	validTime, runTime int64
 	latA, lonA         float64
 	latB, lonB         float64
@@ -362,6 +384,9 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 			if rx.t != ry.t {
 				return rx.t > ry.t
 			}
+			if rx.via != ry.via {
+				return rx.via < ry.via
+			}
 			return rx.obsID > ry.obsID
 		})
 		if len(idx) > ductingLinksMaxRecv {
@@ -370,7 +395,7 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 		recs := make([]DuctingReception, len(idx))
 		for k, i := range idx {
 			r := &in.Recv[i]
-			recs[k] = DuctingReception{T: r.t, SNR: r.snr, RSSI: r.rssi, DuctFrac: ductF[i], SuperFrac: superF[i]}
+			recs[k] = DuctingReception{T: r.t, Via: r.via, SNR: r.snr, RSSI: r.rssi, DuctFrac: ductF[i], SuperFrac: superF[i]}
 		}
 		resp.Links = append(resp.Links, DuctingLink{
 			A: in.Ends[p.a], B: in.Ends[p.b],
@@ -384,7 +409,7 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 func ductingLinksMemoKeyFor(in ductingLinksInput, p *ductingLinkPair, r *ductingLinkObs, row ductingGridRow) ductingLinksMemoKey {
 	ea, eb := in.Ends[p.a], in.Ends[p.b]
 	return ductingLinksMemoKey{
-		obsID: r.obsID, validTime: row.ValidTime, runTime: row.RunTime,
+		obsID: r.obsID, via: r.via, a: p.a, b: p.b, validTime: row.ValidTime, runTime: row.RunTime,
 		latA: ea.Lat, lonA: ea.Lon, latB: eb.Lat, lonB: eb.Lon, freq: in.FreqMHz,
 	}
 }
@@ -442,44 +467,58 @@ func (s *Server) ductingLinkEnds(nodes []nodeInfo) (map[string]DuctingLinkEnd, e
 	return ends, nil
 }
 
-// ductingScanChunk is how many ADVERTs ductingLinkReceptions scans per hold
-// of the store's read lock: ~0.5 ms in the worst case (every observation a
+// ductingScanChunk is how many transmissions a links scan visits per hold of
+// the store's read lock: ~0.5 ms in the worst case (every observation a
 // reception), so a queued ingest writer never waits for a whole-store scan.
 const ductingScanChunk = 256
 
-// ductingLinkReceptions copies the certain zero-hop advert receptions in
-// [from, to] whose two ends are both in ends. The read lock is held for at
-// most ductingScanChunk adverts at a time. A concurrent eviction compacts the
-// ADVERT list in place between chunks; the scan then resumes after the last
-// advert it saw, or, if that one was evicted, at the same index (which may
-// skip a few adverts). Eviction lowers totalObs, which changes the cache key
-// of ductingLinksState, so the next request rebuilds from a settled store.
-func (s *PacketStore) ductingLinkReceptions(ends map[string]DuctingLinkEnd, cfg *Config, from, to int64) []ductingLinkObs {
-	var out []ductingLinkObs
+// ductingScanChunks calls visit for every transmission of list() (read under
+// the store's read lock), holding the lock for at most ductingScanChunk of
+// them at a time, and calls flush (if not nil) after each hold, unlocked. A
+// concurrent eviction compacts the list in place between chunks; the scan
+// then resumes after the last transmission it saw, or, if that one was
+// evicted, at the same index (which may skip a few). Eviction lowers
+// totalObs, which changes the cache key of ductingLinksState, so the next
+// request rebuilds from a settled store.
+func (s *PacketStore) ductingScanChunks(list func() []*StoreTx, visit func(*StoreTx), flush func()) {
 	var last *StoreTx
 	for pos := 0; ; {
 		s.mu.RLock()
-		list := s.byPayloadType[PayloadADVERT]
-		if last != nil && (pos > len(list) || list[pos-1] != last) {
-			for i, tx := range list { // moved by an eviction: find where we were
+		l := list()
+		if last != nil && (pos > len(l) || l[pos-1] != last) {
+			for i, tx := range l { // moved by an eviction: find where we were
 				if tx == last {
 					pos = i + 1
 					break
 				}
 			}
 		}
-		if pos >= len(list) {
+		if pos >= len(l) {
 			s.mu.RUnlock()
-			return out
+			return
 		}
-		end := min(pos+ductingScanChunk, len(list))
-		for _, tx := range list[pos:end] {
-			out = ductingAdvertReceptions(out, tx, ends, cfg, from, to)
+		end := min(pos+ductingScanChunk, len(l))
+		for _, tx := range l[pos:end] {
+			visit(tx)
 		}
-		last = list[end-1]
+		last = l[end-1]
 		pos = end
 		s.mu.RUnlock()
+		if flush != nil {
+			flush()
+		}
 	}
+}
+
+// ductingLinkReceptions copies the certain zero-hop advert receptions in
+// [from, to] whose two ends are both in ends (via "observer"), scanning the
+// ADVERT list in chunks (ductingScanChunks).
+func (s *PacketStore) ductingLinkReceptions(ends map[string]DuctingLinkEnd, cfg *Config, from, to int64) []ductingLinkObs {
+	var out []ductingLinkObs
+	s.ductingScanChunks(func() []*StoreTx { return s.byPayloadType[PayloadADVERT] }, func(tx *StoreTx) {
+		out = ductingAdvertReceptions(out, tx, ends, cfg, from, to)
+	}, nil)
+	return out
 }
 
 // ductingAdvertReceptions appends tx's qualifying receptions to out. The
@@ -514,10 +553,155 @@ func ductingAdvertReceptions(out []ductingLinkObs, tx *StoreTx, ends map[string]
 			sigChecked = true
 		}
 		out = append(out, ductingLinkObs{
-			obsID: obs.ID, t: ts.Unix(), a: a, b: b,
+			obsID: obs.ID, t: ts.Unix(), a: a, b: b, via: ductingViaObserver,
 			snr: copyFloatPtr(obs.SNR), rssi: copyFloatPtr(obs.RSSI),
 		})
 	}
+	return out
+}
+
+// ductingRelayPath is one distinct observed path of a transmission, with the
+// hop width that binds it to its own flood frame (StoreObs.relayHopHexLen).
+type ductingRelayPath struct {
+	path   string // path_json as stored (shared, not copied)
+	hexLen int
+}
+
+// ductingRelayTx is what the relay scan copies of one flood transmission
+// under the lock: everything pair resolution needs, nothing else.
+type ductingRelayTx struct {
+	id     int
+	t      int64  // earliest eligible observation, unix seconds
+	origin string // advert pubkey (lowercase); "" when not an ADVERT
+	paths  []ductingRelayPath
+}
+
+// ductingRelayCopy appends tx to buf when it is a flood transmission in
+// [from, to] with at least one certain-width path. The caller holds the
+// store's read lock. A failed advert signature drops the whole transmission,
+// as liveness does (noteCertainRelays, certainFor).
+func ductingRelayCopy(buf []ductingRelayTx, tx *StoreTx, cfg *Config, from, to int64) []ductingRelayTx {
+	if tx.RouteType == nil || (*tx.RouteType != RouteFlood && *tx.RouteType != RouteTransportFlood) {
+		return buf
+	}
+	var paths []ductingRelayPath
+	first := int64(math.MaxInt64)
+	for _, obs := range tx.Observations {
+		if obs == nil || obs.isOwnTransmission() || cfg.IsObserverBlacklisted(obs.ObserverID) {
+			continue
+		}
+		if ts, ok := obs.ParsedTime(); ok && ts.Unix() < first {
+			first = ts.Unix()
+		}
+		// Zero for an empty path, a path that does not match its frame, a
+		// TRACE or a legacy row without raw_hex: no certain hop at all.
+		n := int(obs.relayHopHexLen)
+		if n == 0 {
+			continue
+		}
+		dup := false
+		for _, p := range paths {
+			if p.hexLen == n && p.path == obs.PathJSON {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			paths = append(paths, ductingRelayPath{path: obs.PathJSON, hexLen: n})
+		}
+	}
+	if len(paths) == 0 || first < from || first > to || tx.signatureFailed() {
+		return buf
+	}
+	return append(buf, ductingRelayTx{id: tx.ID, t: first, origin: advertOriginPubkey(tx), paths: paths})
+}
+
+// ductingHopCacheMax bounds the per-rebuild hop resolution cache.
+const ductingHopCacheMax = 1 << 16
+
+// ductingHopResolver resolves path hops to the one node they can only be,
+// by the certain-liveness rule (#2260), caching per rebuild.
+type ductingHopResolver struct {
+	pm    *prefixMap
+	cache map[string]string
+}
+
+// node returns the lowercase pubkey of the only node hop (n hex characters
+// wide) can be, or "".
+func (r *ductingHopResolver) node(hop string, n int) string {
+	if len(hop) != n || r.pm == nil {
+		return ""
+	}
+	if pk, ok := r.cache[hop]; ok {
+		return pk
+	}
+	pk := ""
+	if c := r.pm.relayCandidates(hop); len(c) == 1 {
+		if cand := strings.ToLower(c[0].PublicKey); uniqueHopPrefix(cand, n, r.pm) {
+			pk = cand
+		}
+	}
+	if len(r.cache) < ductingHopCacheMax {
+		r.cache[hop] = pk
+	}
+	return pk
+}
+
+// ductingRelayReceptions appends the certain pairs of one copied
+// transmission, each (transmitter, receiver) once.
+func ductingRelayReceptions(out []ductingLinkObs, rt *ductingRelayTx, res *ductingHopResolver, ends map[string]DuctingLinkEnd) []ductingLinkObs {
+	start := len(out)
+	add := func(a, b string) {
+		if a == "" || b == "" || a == b {
+			return
+		}
+		if _, ok := ends[a]; !ok {
+			return
+		}
+		if _, ok := ends[b]; !ok {
+			return
+		}
+		for _, o := range out[start:] {
+			if o.a == a && o.b == b {
+				return
+			}
+		}
+		out = append(out, ductingLinkObs{obsID: rt.id, t: rt.t, a: a, b: b, via: ductingViaRelay})
+	}
+	for _, p := range rt.paths {
+		prev := rt.origin // the originator transmitted to path[0]
+		for pos := 0; ; {
+			hop, next, ok := nextPathHop(p.path, pos)
+			if !ok {
+				break
+			}
+			pos = next
+			cur := res.node(hop, p.hexLen)
+			add(prev, cur) // an uncertain hop ("") drops only its own pairs
+			prev = cur
+		}
+	}
+	return out
+}
+
+// ductingRelayLinkReceptions scans every transmission in chunks, copying the
+// flood paths under the read lock and resolving them between holds.
+func (s *PacketStore) ductingRelayLinkReceptions(ends map[string]DuctingLinkEnd, pm *prefixMap, cfg *Config, from, to int64) []ductingLinkObs {
+	var out []ductingLinkObs
+	if pm == nil {
+		return out
+	}
+	res := &ductingHopResolver{pm: pm, cache: make(map[string]string)}
+	var buf []ductingRelayTx
+	s.ductingScanChunks(func() []*StoreTx { return s.packets }, func(tx *StoreTx) {
+		buf = ductingRelayCopy(buf, tx, cfg, from, to)
+	}, func() {
+		for i := range buf {
+			out = ductingRelayReceptions(out, &buf[i], res, ends)
+		}
+		clear(buf)
+		buf = buf[:0]
+	})
 	return out
 }
 
@@ -535,13 +719,15 @@ func (s *Server) ductingLinksInputFor(days int, now time.Time) (ductingLinksInpu
 	if s.store == nil {
 		return in, errors.New("no packet store")
 	}
-	nodes, _ := s.store.getCachedNodesAndPM()
+	nodes, pm := s.store.getCachedNodesAndPM()
 	ends, err := s.ductingLinkEnds(nodes)
 	if err != nil {
 		return in, err
 	}
 	in.Ends = ends
-	in.Recv = s.store.ductingLinkReceptions(ends, s.cfg, now.Unix()-int64(days)*86400, now.Unix())
+	from, to := now.Unix()-int64(days)*86400, now.Unix()
+	in.Recv = s.store.ductingLinkReceptions(ends, s.cfg, from, to)
+	in.Recv = append(in.Recv, s.store.ductingRelayLinkReceptions(ends, pm, s.cfg, from, to)...)
 	return in, nil
 }
 

@@ -134,7 +134,8 @@ type DuctingLinkEnd struct {
 // DuctingReception is one reception of a link.
 type DuctingReception struct {
 	T         int64    `json:"t"`
-	SNR       *float64 `json:"snr,omitempty"`
+	Via       string   `json:"via"`           // "observer": zero-hop advert heard by an observer node; "relay": consecutive certain hops of a flood path
+	SNR       *float64 `json:"snr,omitempty"` // observer receptions only (a path's SNR is the last hop's link to the observer)
 	RSSI      *float64 `json:"rssi,omitempty"`
 	DuctFrac  float64  `json:"ductFrac"`  // share of path samples whose duct can carry FreqMHz; -1 = no stored step
 	SuperFrac float64  `json:"superFrac"` // share of path samples that are super-refractive; -1 = no stored step

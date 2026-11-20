@@ -135,7 +135,7 @@ func linksIn(ends ...DuctingLinkEnd) ductingLinksInput {
 }
 
 func linksRecv(id int, t int64, a, b string) ductingLinkObs {
-	return ductingLinkObs{obsID: id, t: t, a: a, b: b}
+	return ductingLinkObs{obsID: id, t: t, a: a, b: b, via: ductingViaObserver}
 }
 
 var (
@@ -470,8 +470,17 @@ func linksObs(id int, observer, path string, at time.Time) *StoreObs {
 	return &StoreObs{ID: id, ObserverID: observer, PathJSON: path, Timestamp: at.UTC().Format(time.RFC3339), SNR: &snr}
 }
 
+// linksServer is a store holding txs (in first-seen order, as s.packets is)
+// indexed by payload type, over the given node cache.
 func linksServer(cfg *Config, nodes []nodeInfo, txs ...*StoreTx) *Server {
-	st := &PacketStore{byPayloadType: map[int][]*StoreTx{PayloadADVERT: txs}}
+	st := &PacketStore{byPayloadType: map[int][]*StoreTx{}, packets: txs}
+	for _, tx := range txs {
+		pt := PayloadADVERT
+		if tx.PayloadType != nil {
+			pt = *tx.PayloadType
+		}
+		st.byPayloadType[pt] = append(st.byPayloadType[pt], tx)
+	}
 	st.nodeCache = nodes
 	st.nodePM = buildPrefixMap(nodes)
 	st.nodeCacheTime = time.Now()
