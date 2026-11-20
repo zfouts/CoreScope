@@ -105,6 +105,20 @@ type DuctingConfig struct {
 	RefreshMinutes int         `json:"refreshMinutes,omitempty"` // default 360, allowed 60..1440
 	ForecastHours  int         `json:"forecastHours,omitempty"`  // default 48, allowed 1..120
 	BaseURL        string      `json:"baseUrl,omitempty"`        // default https://api.open-meteo.com
+
+	// Source picks where the field comes from: "gfs-grid" (default) is the
+	// global grid the ingestor computes from NOAA GFS and stores in the
+	// ducting_grid table (ducting_grid_types.go); "open-meteo" is the
+	// per-point Open-Meteo fetch above (model, area, marginDeg, gridStepDeg,
+	// maxPoints, refreshMinutes, forecastHours and baseUrl apply to it only).
+	Source string `json:"source,omitempty"`
+	// HistoryDays is how many days of past grids the ingestor keeps and the
+	// time slider offers (gfs-grid only). Default 7, allowed 1..30.
+	HistoryDays int `json:"historyDays,omitempty"`
+	// GridBaseURL is the NOAA GFS bucket (or a mirror of it) the ingestor
+	// downloads from (gfs-grid only). Default
+	// https://noaa-gfs-bdp-pds.s3.amazonaws.com. The server never reads it.
+	GridBaseURL string `json:"gridBaseUrl,omitempty"`
 }
 
 // DuctingClientConfig is the `ducting` field of /api/config/client; nil

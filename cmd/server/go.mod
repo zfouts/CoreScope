@@ -81,3 +81,7 @@ require (
 replace github.com/meshcore-analyzer/mailer => ../../internal/mailer
 
 replace github.com/meshcore-analyzer/dbx => ../../internal/dbx
+
+require github.com/meshcore-analyzer/ducting v0.0.0
+
+replace github.com/meshcore-analyzer/ducting => ../../internal/ducting
