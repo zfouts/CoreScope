@@ -118,8 +118,10 @@ func BenchmarkPathStats500km(b *testing.B) {
 	}
 }
 
-// Enhanced counts every sample at or above super-refraction (ducts too);
-// MeanN averages the non-zero N of the samples with data.
+// SuperOrDuct counts samples at or above super-refraction by class (ducts
+// too); Enhanced counts samples whose N is at or below HighGradientNk,
+// whatever the class; MeanN averages the non-zero N of the samples with
+// data.
 func TestPathStatsEnhancedAndMeanN(t *testing.T) {
 	g := gfsGrid(t)
 	for idx := range g.C {
@@ -133,6 +135,10 @@ func TestPathStatsEnhancedAndMeanN(t *testing.T) {
 			g.Set(idx, Result{Class: ClassNormal}) // N = 0: no value
 		case lat > 27:
 			g.Set(idx, Result{}) // no data
+		case lat < 3:
+			g.Set(idx, Result{Class: ClassNormal, MeanGradNkm: HighGradientNk}) // on the boundary: high
+		case lat < 6:
+			g.Set(idx, Result{Class: ClassNormal, MeanGradNkm: HighGradientNk + 1}) // just above: not high
 		default:
 			g.Set(idx, Result{Class: ClassNormal, MeanGradNkm: -40})
 		}
@@ -146,17 +152,26 @@ func TestPathStatsEnhancedAndMeanN(t *testing.T) {
 		switch {
 		case lat >= 10 && lat <= 20:
 			want.Duct++
+			want.SuperOrDuct++
 			want.Enhanced++
 			sum += -160
 			want.NCount++
 		case lat > 20 && lat <= 25:
 			want.Super++
+			want.SuperOrDuct++
 			want.Enhanced++
 			sum += -90
 			want.NCount++
 		case lat > 25 && lat <= 27:
 		case lat > 27:
 			want.NoData++
+		case lat < 3:
+			want.Enhanced++
+			sum += HighGradientNk
+			want.NCount++
+		case lat < 6:
+			sum += HighGradientNk + 1
+			want.NCount++
 		default:
 			sum += -40
 			want.NCount++
@@ -171,10 +186,11 @@ func TestPathStatsEnhancedAndMeanN(t *testing.T) {
 		t.Fatalf("got %+v\nwant %+v", st, want)
 	}
 
-	// No N plane (a Decoder without N): counts unchanged, no mean.
+	// No N plane (a Decoder without N): class counts unchanged, no mean and
+	// nothing high.
 	g.N = nil
 	st2 := g.PathStats(0, 0, 30, 0, 869.5, 50)
-	if st2.MeanN != 0 || st2.NCount != 0 || st2.Enhanced != want.Enhanced || st2.Duct != want.Duct {
+	if st2.MeanN != 0 || st2.NCount != 0 || st2.Enhanced != 0 || st2.SuperOrDuct != want.SuperOrDuct || st2.Duct != want.Duct {
 		t.Fatalf("without N: %+v", st2)
 	}
 	// All without a value: 0 and 0.

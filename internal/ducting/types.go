@@ -30,7 +30,11 @@ const (
 const (
 	MaxHeightAGL    = 3000.0 // m: only the lowest 3 km are analysed
 	SuperGradientNk = -79.0  // N/km: super-refraction threshold
-	SurfaceHeightM  = 2.0    // m AGL of the 2 m surface point
+	// HighGradientNk is where the map legend's "High" band starts (N/km,
+	// mean dN/dh over the lowest MeanLayerM): public/map-ducting.js
+	// STOP_N[4], the "High" label of BAR_LABELS. Keep the two equal.
+	HighGradientNk = -62.0
+	SurfaceHeightM = 2.0 // m AGL of the 2 m surface point
 	// FminConstMHz: fmin = FminConstMHz / (d * sqrt(ΔM)) MHz, the same
 	// constant for surface-based and elevated ducts, on purpose. There is no
 	// single ratio between the two: ITU-R P.834-4 (2003) section 7.2 and its

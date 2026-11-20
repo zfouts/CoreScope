@@ -55,11 +55,14 @@ func (g *Grid) PathStats(lat1, lon1, lat2, lon2, freqMHz, spacingKm float64) Pat
 			st.Super++
 		}
 		if g.C[idx] >= ClassSuper {
-			st.Enhanced++
+			st.SuperOrDuct++
 		}
 		if idx < len(g.N) && g.N[idx] != 0 {
 			sumN += float64(g.N[idx])
 			st.NCount++
+			if float64(g.N[idx]) <= HighGradientNk {
+				st.Enhanced++
+			}
 		}
 	}
 	if st.NCount > 0 {

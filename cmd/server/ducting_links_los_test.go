@@ -278,8 +278,10 @@ func TestDuctingLinksLOSCheckBudget(t *testing.T) {
 func TestDuctingLinksRefractionMetric(t *testing.T) {
 	s1, s2, s3 := linksNow.Unix()-3*3600, linksNow.Unix()-2*3600, linksNow.Unix()-3600
 	src := newLinksFakeSrc()
-	src.add(linksGrid(t, 0, s1, linksAll(ducting.Result{Class: ducting.ClassSuper, MeanGradNkm: -100})))
-	src.add(linksGrid(t, 0, s2, linksAll(ducting.Result{Class: ducting.ClassNormal, MeanGradNkm: -40})))
+	// The class and the mean gradient disagree on purpose: s1 is high by
+	// the gradient but normal by class, s2 super by class but not high.
+	src.add(linksGrid(t, 0, s1, linksAll(ducting.Result{Class: ducting.ClassNormal, MeanGradNkm: -100})))
+	src.add(linksGrid(t, 0, s2, linksAll(ducting.Result{Class: ducting.ClassSuper, MeanGradNkm: -40})))
 	src.add(linksGrid(t, 0, s3, linksAll(linksNormal))) // no N values
 	in := linksIn(linksEnd(lpA, 50, 0, 5), linksEnd(lpB, 50, 3, 5))
 	in.Recv = []ductingLinkObs{
@@ -290,23 +292,23 @@ func TestDuctingLinksRefractionMetric(t *testing.T) {
 	}
 	resp := mustBuild(t, in, src)
 	r := resp.Links[0].Receptions // newest first: 4, 3, 2, 1
-	if r[0].MeanGradNkm != nil || r[0].SuperFrac != -1 {
+	if r[0].MeanGradNkm != nil || r[0].SuperFrac != -1 || r[0].HighFrac != -1 || r[0].DuctFrac != -1 {
 		t.Errorf("no step: %+v", r[0])
 	}
-	if r[1].MeanGradNkm != nil || r[1].SuperFrac != 0 {
+	if r[1].MeanGradNkm != nil || r[1].SuperFrac != 0 || r[1].HighFrac != 0 {
 		t.Errorf("no N: %+v", r[1])
 	}
-	if r[2].MeanGradNkm == nil || *r[2].MeanGradNkm != -40 || r[2].SuperFrac != 0 {
-		t.Errorf("normal: %+v", r[2])
+	if r[2].MeanGradNkm == nil || *r[2].MeanGradNkm != -40 || r[2].SuperFrac != 1 || r[2].HighFrac != 0 {
+		t.Errorf("super by class, not high: %+v", r[2])
 	}
-	if r[3].MeanGradNkm == nil || *r[3].MeanGradNkm != -100 || r[3].SuperFrac != 1 || r[3].DuctFrac != 0 {
-		t.Errorf("super: %+v", r[3])
+	if r[3].MeanGradNkm == nil || *r[3].MeanGradNkm != -100 || r[3].SuperFrac != 0 || r[3].HighFrac != 1 || r[3].DuctFrac != 0 {
+		t.Errorf("high, normal by class: %+v", r[3])
 	}
 	s := resp.Summary
 	if s.WithGrid != 3 || s.RecvEnhancedFrac != 1.0/3 || s.RecvMeanGradNkm == nil || *s.RecvMeanGradNkm != -70 {
 		t.Errorf("receptions: %+v (mean %v)", s, deref(s.RecvMeanGradNkm))
 	}
-	// Baseline: 1 pair x 3 steps; one enhanced; N on two of them.
+	// Baseline: 1 pair x 3 steps; one high (s1, not the super-class s2); N on two of them.
 	if s.BaselineEnhancedFrac != 1.0/3 || s.BaselineMeanGradNkm == nil || *s.BaselineMeanGradNkm != -70 || s.BaselineDuctFrac != 0 {
 		t.Errorf("baseline: %+v (mean %v)", s, deref(s.BaselineMeanGradNkm))
 	}
@@ -349,7 +351,7 @@ func TestDuctingLinksLOSServer(t *testing.T) {
 	st.now = func() time.Time { return linksNow }
 	body := linksGet(st, srv, src, "", 7).Body.String()
 	for _, f := range []string{`"losMethod":"smooth-earth"`, `"unverifiedPairs":0`, `"recvMeanGradNkm":-90`, `"baselineMeanGradNkm":-90`,
-		`"recvEnhancedFrac":1`, `"baselineEnhancedFrac":1`, `"meanGradNkm":-90`} {
+		`"recvEnhancedFrac":1`, `"baselineEnhancedFrac":1`, `"meanGradNkm":-90`, `"highFrac":1`, `"superFrac":1`} {
 		if !strings.Contains(body, f) {
 			t.Errorf("body lacks %s: %s", f, body)
 		}

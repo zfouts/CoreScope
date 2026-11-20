@@ -241,15 +241,17 @@ func TestDuctingLinksSuperAndNoData(t *testing.T) {
 
 func TestDuctingLinksPathFracs(t *testing.T) {
 	for _, c := range []struct {
-		ps          ducting.PathStats
-		duct, super float64
+		ps   ducting.PathStats
+		want ductingPathMetric
 	}{
-		{ducting.PathStats{Samples: 10, NoData: 2, Duct: 4, Super: 2, Enhanced: 6}, 0.5, 0.75},
-		{ducting.PathStats{Samples: 5, NoData: 5}, -1, -1},
-		{ducting.PathStats{}, -1, -1},
+		{ducting.PathStats{Samples: 10, NoData: 2, Duct: 4, Super: 2, SuperOrDuct: 6, Enhanced: 2, NCount: 8, MeanN: -55},
+			ductingPathMetric{duct: 0.5, super: 0.75, high: 0.25, meanN: -55, hasN: true}},
+		{ducting.PathStats{Samples: 4, Duct: 1, SuperOrDuct: 1}, ductingPathMetric{duct: 0.25, super: 0.25}},
+		{ducting.PathStats{Samples: 5, NoData: 5}, ductingNoMetric},
+		{ducting.PathStats{}, ductingNoMetric},
 	} {
-		if d, s := ductingPathFracs(c.ps); d != c.duct || s != c.super {
-			t.Errorf("%+v -> %v, %v want %v, %v", c.ps, d, s, c.duct, c.super)
+		if got := ductingPathMetricOf(c.ps); got != c.want {
+			t.Errorf("%+v -> %+v want %+v", c.ps, got, c.want)
 		}
 	}
 }

@@ -37,7 +37,7 @@ func decodePlanesAgrees(t *testing.T, d *Decoder, name string, b []byte) bool {
 		if got.N != nil {
 			t.Fatalf("%s: N filled without Decoder.N", name)
 		}
-		w.MeanN, w.NCount = 0, 0 // no N plane: no mean
+		w.MeanN, w.NCount, w.Enhanced = 0, 0, 0 // no N plane: no mean, nothing high
 	}
 	if a != w {
 		t.Fatalf("%s: PathStats %+v vs %+v", name, a, w)

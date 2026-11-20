@@ -359,33 +359,33 @@ type ductingLinkPair struct {
 	recv    []int // indices into in.Recv
 }
 
-// ductingPathMetric is one path at one step. duct and enh are -1 when no
-// sample had data; hasN is false when no sample had a mean dN/dh.
+// ductingPathMetric is one path at one step: the shares of the samples with
+// data that carry LoRa in a duct (duct), are super-refractive or ducting by
+// class (super) and are in the map's High band or stronger (high); -1 for
+// all three when no sample had data. hasN is false when no sample had a
+// mean dN/dh.
 type ductingPathMetric struct {
-	duct, enh float64
-	meanN     float64
-	hasN      bool
+	duct, super, high float64
+	meanN             float64
+	hasN              bool
 }
 
-var ductingNoMetric = ductingPathMetric{duct: -1, enh: -1}
+var ductingNoMetric = ductingPathMetric{duct: -1, super: -1, high: -1}
 
 func ductingPathMetricOf(ps ducting.PathStats) ductingPathMetric {
-	m := ductingNoMetric
-	m.duct, m.enh = ductingPathFracs(ps)
-	if m.duct >= 0 && ps.NCount > 0 {
+	n := ps.Samples - ps.NoData
+	if n <= 0 {
+		return ductingNoMetric
+	}
+	m := ductingPathMetric{
+		duct:  float64(ps.Duct) / float64(n),
+		super: float64(ps.SuperOrDuct) / float64(n),
+		high:  float64(ps.Enhanced) / float64(n),
+	}
+	if ps.NCount > 0 {
 		m.meanN, m.hasN = ps.MeanN, true
 	}
 	return m
-}
-
-// ductingPathFracs turns path stats into the duct and enhanced (super or
-// duct) shares; -1 for both when no sample had data.
-func ductingPathFracs(ps ducting.PathStats) (duct, enhanced float64) {
-	n := ps.Samples - ps.NoData
-	if n <= 0 {
-		return -1, -1
-	}
-	return float64(ps.Duct) / float64(n), float64(ps.Enhanced) / float64(n)
 }
 
 // ductingTally accumulates shares and a mean over path metrics with data.
@@ -403,7 +403,7 @@ func (t *ductingTally) add(m ductingPathMetric) {
 	if m.duct >= ductingLinksDuctFrac {
 		t.duct++
 	}
-	if m.enh >= ductingLinksDuctFrac {
+	if m.high >= ductingLinksDuctFrac {
 		t.enh++
 	}
 	if m.hasN {
@@ -632,7 +632,7 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 		recs := make([]DuctingReception, len(idx))
 		for j, i := range idx {
 			r, m := &in.Recv[i], metric[i]
-			recs[j] = DuctingReception{T: r.t, Via: r.via, SNR: r.snr, RSSI: r.rssi, DuctFrac: m.duct, SuperFrac: m.enh}
+			recs[j] = DuctingReception{T: r.t, Via: r.via, SNR: r.snr, RSSI: r.rssi, DuctFrac: m.duct, SuperFrac: m.super, HighFrac: m.high}
 			if m.hasN {
 				v := m.meanN
 				recs[j].MeanGradNkm = &v

@@ -114,9 +114,10 @@ type DuctingLinksSummary struct {
 	// over the (pair, step) combinations of BaselineDuctFrac. nil: no data.
 	RecvMeanGradNkm     *float64 `json:"recvMeanGradNkm"`
 	BaselineMeanGradNkm *float64 `json:"baselineMeanGradNkm"`
-	// RecvEnhancedFrac: of WithGrid, the share whose path enhanced share
-	// (superFrac) >= ductingLinksDuctFrac; BaselineEnhancedFrac: the same
-	// over the baseline combinations. -1 when there is no data.
+	// RecvEnhancedFrac: of WithGrid, the share of receptions whose path
+	// highFrac >= ductingLinksDuctFrac (at least half the path in the map's
+	// High band or stronger); BaselineEnhancedFrac: the same over the
+	// baseline combinations. -1 when there is no data.
 	RecvEnhancedFrac     float64 `json:"recvEnhancedFrac"`
 	BaselineEnhancedFrac float64 `json:"baselineEnhancedFrac"`
 	// LosMethod: "terrain" (SRTM profile at los.kFactor; endpoint elevations
@@ -152,12 +153,18 @@ type DuctingLinkEnd struct {
 
 // DuctingReception is one reception of a link.
 type DuctingReception struct {
-	T         int64    `json:"t"`
-	Via       string   `json:"via"`           // "observer": zero-hop advert heard by an observer node; "relay": consecutive certain hops of a flood path
-	SNR       *float64 `json:"snr,omitempty"` // observer receptions only (a path's SNR is the last hop's link to the observer)
-	RSSI      *float64 `json:"rssi,omitempty"`
-	DuctFrac  float64  `json:"ductFrac"`  // share of path samples whose duct can carry FreqMHz; -1 = no stored step
-	SuperFrac float64  `json:"superFrac"` // share of path samples at least super-refractive (super or duct); -1 = no stored step
+	T    int64    `json:"t"`
+	Via  string   `json:"via"`           // "observer": zero-hop advert heard by an observer node; "relay": consecutive certain hops of a flood path
+	SNR  *float64 `json:"snr,omitempty"` // observer receptions only (a path's SNR is the last hop's link to the observer)
+	RSSI *float64 `json:"rssi,omitempty"`
+	// The shares are of the path samples with data (Samples - NoData); -1
+	// for all three when there is no stored step or no sample has data.
+	DuctFrac  float64 `json:"ductFrac"`  // in a duct whose lowest trapped frequency is <= FreqMHz
+	SuperFrac float64 `json:"superFrac"` // class super-refractive or ducting (C >= ClassSuper: some layer at or below -79 N/km)
+	// HighFrac: mean dN/dh over the lowest 1.5 km at or below
+	// ducting.HighGradientNk (-62 N/km, where the map legend's High band
+	// starts); a sample without a value counts as not high.
+	HighFrac float64 `json:"highFrac"`
 	// MeanGradNkm is the mean dN/dh (N/km) along the path; nil without a
 	// stored step or without values along the path.
 	MeanGradNkm *float64 `json:"meanGradNkm"`
