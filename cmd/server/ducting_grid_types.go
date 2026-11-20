@@ -30,15 +30,20 @@ const (
 	ductingLinksMaxPairs    = 500      // node pairs per /api/ducting/links answer, longest first
 	ductingLinksRecvBucketS = 3 * 3600 // receptions listed per pair: the newest per stored step (or per 3 h UTC bucket without one)
 	ductingLinksRecvPerDay  = 8        // ... and at most this many per day of history
-	ductingLinksPathKm      = 25.0     // path sample spacing
-	ductingLinksStepWindowS = 5400     // a reception uses the grid step within ±90 min of it
-	ductingLinksDuctFrac    = 0.5      // "during a duct": at least this share of path samples carry LoRa
-	ductingLinksMaxSamples  = 64       // path samples per reception at most
-	ductingLinksCacheTTL    = 5 * 60   // seconds a computed links answer is reused (same days, data generation, run, visibility)
-	ductingLinksMaxMemo     = 5000     // per-reception results remembered across rebuilds, keyed by (observation, run_time)
-	ductingGridLRUSteps     = 8        // decoded steps kept in memory (~3.4 MB each at 0.5°)
-	ductingGridMaxAgeS      = 600      // Cache-Control max-age of /api/ducting/grid
-	ductingHistoryDaysMax   = 30
+	// Path-gradient bins of the summary (N/km; the third edge is
+	// ducting.HighGradientNk, -62, where the map legend's High band starts).
+	ductingLinksGradNormalNk   = -40.0 // about normal air and weaker
+	ductingLinksGradAboveNk    = -50.0
+	ductingLinksPersistentFrac = 0.9    // a pair heard in at least this share of its steps is persistent
+	ductingLinksPathKm         = 25.0   // path sample spacing
+	ductingLinksStepWindowS    = 5400   // a reception uses the grid step within ±90 min of it
+	ductingLinksDuctFrac       = 0.5    // "during a duct": at least this share of path samples carry LoRa
+	ductingLinksMaxSamples     = 64     // path samples per reception at most
+	ductingLinksCacheTTL       = 5 * 60 // seconds a computed links answer is reused (same days, data generation, run, visibility)
+	ductingLinksMaxMemo        = 5000   // per-reception results remembered across rebuilds, keyed by (observation, run_time)
+	ductingGridLRUSteps        = 8      // decoded steps kept in memory (~3.4 MB each at 0.5°)
+	ductingGridMaxAgeS         = 600    // Cache-Control max-age of /api/ducting/grid
+	ductingHistoryDaysMax      = 30
 )
 
 // ductingGridRow is one ducting_grid row without its blob.
@@ -133,6 +138,31 @@ type DuctingLinksSummary struct {
 	// check has not run yet (per-rebuild budget, tiles loading) or had no
 	// terrain data; they are left out until verified.
 	UnverifiedPairs int `json:"unverifiedPairs"`
+	// ByGradient: every (listed pair, stored step valid in the period)
+	// combination whose path has a mean dN/dh (over the lowest 1.5 km,
+	// averaged along the path), binned by that mean, least negative bin
+	// first: > -40, (-50, -40], (-62, -50], <= -62 N/km. A value on an edge
+	// is in the more negative bin, as on the map legend, whose High band
+	// starts at -62 (ducting.HighGradientNk). HeardSteps of PathSteps had at
+	// least one reception of the pair mapped to that step (the ±90 min rule
+	// of the receptions). Always the four bins, in that order.
+	ByGradient []DuctingGradientBin `json:"byGradient"`
+	// IntermittentPairs: listed pairs heard in at least one but fewer than
+	// ductingLinksPersistentFrac (90%) of their steps in ByGradient.
+	// ByGradientIntermittent is ByGradient over those pairs only: a pair
+	// heard in (nearly) every step is heard whatever the weather.
+	IntermittentPairs      int                  `json:"intermittentPairs"`
+	ByGradientIntermittent []DuctingGradientBin `json:"byGradientIntermittent"`
+}
+
+// DuctingGradientBin is one path-gradient bin of the summary. FromNkm is the
+// less negative edge, belonging to the bin; ToNkm the more negative edge,
+// not belonging to it (it starts the next bin); null is open-ended.
+type DuctingGradientBin struct {
+	FromNkm    *float64 `json:"fromNkm"`
+	ToNkm      *float64 `json:"toNkm"`
+	PathSteps  int      `json:"pathSteps"`  // (pair, step) combinations in the bin
+	HeardSteps int      `json:"heardSteps"` // of PathSteps: the pair was heard in that step
 }
 
 // DuctingLink is one node pair: A transmitted, B heard it directly (a

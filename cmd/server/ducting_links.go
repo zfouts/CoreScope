@@ -453,7 +453,79 @@ func ductingNearestRow(rows []ductingGridRow, t int64) int {
 
 // ductingLinksEmptySummary is the summary of an answer without data.
 func ductingLinksEmptySummary(losMethod string) DuctingLinksSummary {
-	return DuctingLinksSummary{BaselineDuctFrac: -1, RecvEnhancedFrac: -1, BaselineEnhancedFrac: -1, LosMethod: losMethod}
+	return DuctingLinksSummary{
+		BaselineDuctFrac: -1, RecvEnhancedFrac: -1, BaselineEnhancedFrac: -1, LosMethod: losMethod,
+		ByGradient: ductingGradientBins(), ByGradientIntermittent: ductingGradientBins(),
+	}
+}
+
+// ductingGradientEdges are the edges of the summary's path-gradient bins,
+// least negative first (N/km, mean dN/dh over the lowest 1.5 km). A value on
+// an edge belongs to the more negative bin, as on the map legend (a band
+// includes its upper edge): bin 0 is > -40, bin 1 is (-50, -40], bin 2 is
+// (-62, -50], bin 3 is <= -62, the legend's High band and stronger.
+var ductingGradientEdges = [...]float64{ductingLinksGradNormalNk, ductingLinksGradAboveNk, ducting.HighGradientNk}
+
+// ductingGradientBin is the bin of a path mean gradient n.
+func ductingGradientBin(n float64) int {
+	for i, e := range ductingGradientEdges {
+		if n > e {
+			return i
+		}
+	}
+	return len(ductingGradientEdges)
+}
+
+// ductingGradientBins returns the empty bins with their edges.
+func ductingGradientBins() []DuctingGradientBin {
+	out := make([]DuctingGradientBin, len(ductingGradientEdges)+1)
+	for i := range out {
+		if i > 0 {
+			v := ductingGradientEdges[i-1]
+			out[i].FromNkm = &v
+		}
+		if i < len(ductingGradientEdges) {
+			v := ductingGradientEdges[i]
+			out[i].ToNkm = &v
+		}
+	}
+	return out
+}
+
+// ductingGradientCombo is one (listed pair, stored past step) with a path
+// mean gradient: its bin, and whether the pair was heard in that step.
+type ductingGradientCombo struct {
+	bin   uint8
+	heard bool
+}
+
+// ductingGradientSummary bins every pair's combinations (byGradient) and,
+// separately, those of the intermittent pairs: heard in at least one but
+// fewer than ductingLinksPersistentFrac of their steps with data. A
+// persistent pair is heard whatever the weather, so it says nothing about it.
+func ductingGradientSummary(perPair [][]ductingGradientCombo) (all, intermittent []DuctingGradientBin, nIntermittent int) {
+	all, intermittent = ductingGradientBins(), ductingGradientBins()
+	for _, combos := range perPair {
+		heard := 0
+		for _, c := range combos {
+			all[c.bin].PathSteps++
+			if c.heard {
+				all[c.bin].HeardSteps++
+				heard++
+			}
+		}
+		if heard == 0 || float64(heard) >= ductingLinksPersistentFrac*float64(len(combos)) {
+			continue
+		}
+		nIntermittent++
+		for _, c := range combos {
+			intermittent[c.bin].PathSteps++
+			if c.heard {
+				intermittent[c.bin].HeardSteps++
+			}
+		}
+	}
+	return all, intermittent, nIntermittent
 }
 
 // buildDuctingLinks is the analysis over copied inputs. It never touches the
@@ -532,8 +604,10 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 	metric := make([]ductingPathMetric, len(in.Recv))
 	pairOf := make([]*ductingLinkPair, len(in.Recv))
 	rowOf := make([]int, len(in.Recv))
-	need := make(map[int][]int) // row index -> receptions still to compute
-	for _, p := range listed {
+	need := make(map[int][]int)                      // row index -> receptions still to compute
+	heardIn := make([]map[int]struct{}, len(listed)) // per listed pair: the rows it was heard in
+	for j, p := range listed {
+		heardIn[j] = make(map[int]struct{})
 		for _, i := range p.recv {
 			resp.Summary.Receptions++
 			metric[i] = ductingNoMetric
@@ -543,6 +617,7 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 			if row < 0 {
 				continue
 			}
+			heardIn[j][row] = struct{}{}
 			if v, ok := in.Memo.get(in.memoKey(p, &in.Recv[i], rows[row], k)); ok {
 				metric[i] = v
 				continue
@@ -574,6 +649,7 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 	dec := ducting.Decoder{N: true}
 	planes, _ := src.(ductingPlaneLoader)
 	var base ductingTally
+	perPair := make([][]ductingGradientCombo, len(listed))
 	for _, row := range steps {
 		var g *ducting.Grid
 		var err error
@@ -598,10 +674,15 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 			in.Memo.put(in.memoKey(p, &in.Recv[i], rows[row], k), metric[i])
 		}
 		if len(listed) > 0 && isBase(row) {
-			for _, p := range listed {
+			for j, p := range listed {
 				ea, eb := in.Ends[p.a], in.Ends[p.b]
 				// No data along the path at this step: not a combination.
-				base.add(ductingPathMetricOf(g.PathStats(ea.Lat, ea.Lon, eb.Lat, eb.Lon, in.FreqMHz, ductingLinksPathKm)))
+				m := ductingPathMetricOf(g.PathStats(ea.Lat, ea.Lon, eb.Lat, eb.Lon, in.FreqMHz, ductingLinksPathKm))
+				base.add(m)
+				if m.hasN {
+					_, heard := heardIn[j][row]
+					perPair[j] = append(perPair[j], ductingGradientCombo{bin: uint8(ductingGradientBin(m.meanN)), heard: heard})
+				}
 			}
 		}
 		// g goes out of scope here (or is reused by dec): at most one step is held.
@@ -609,6 +690,7 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 	resp.Summary.BaselineDuctFrac = base.frac(base.duct)
 	resp.Summary.BaselineEnhancedFrac = base.frac(base.enh)
 	resp.Summary.BaselineMeanGradNkm = base.meanN()
+	resp.Summary.ByGradient, resp.Summary.ByGradientIntermittent, resp.Summary.IntermittentPairs = ductingGradientSummary(perPair)
 
 	var recv ductingTally
 	for _, p := range listed {
