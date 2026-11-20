@@ -205,6 +205,13 @@
   var MSG_WINDOW_ERROR = 'Could not load ducting data for this area';
   var MSG_PAST = 'Past times show the model’s analysis or short-range forecast for that time, not measurements.';
   var MSG_POSITIONS = 'Positions are self-reported; a long link can also come from a wrong position.';
+  // The legend never grows over the controls above it (zoom, layers): its
+  // max-height is the room between its bottom and the lowest top-left
+  // control, less LEGEND_GAP; it scrolls inside. Never below LEGEND_MIN_H
+  // (the title row). On short screens the long-link details start folded.
+  var LEGEND_GAP = 10;
+  var LEGEND_MIN_H = 40;
+  var SHORT_SCREEN = '(max-height: 820px)';
 
   function isGridMode() {
     var c = (typeof window !== 'undefined' && window.MC_DUCTING_CFG) || null;
@@ -1231,6 +1238,8 @@
             var box = el('div', 'mc-duct-legend');
             self._legendEl = box;
             if (L.DomEvent && L.DomEvent.disableClickPropagation) L.DomEvent.disableClickPropagation(box);
+            // It scrolls when capped (_fitLegend): the wheel scrolls it, not the map.
+            if (L.DomEvent && L.DomEvent.disableScrollPropagation) L.DomEvent.disableScrollPropagation(box);
             return box;
           };
           this._legendCtl = legendCtl;
@@ -1282,6 +1291,27 @@
           }
         } catch (_) { h = 0; }
         corner.style.marginBottom = h ? h + 'px' : '';
+        this._fitLegend();
+      },
+
+      // Caps the legend's height so it ends LEGEND_GAP below the lowest
+      // control of the top-left corner (measured, so any page's controls
+      // count). The legend's bottom does not move with its height (the
+      // corner stacks from the bottom), so one measurement is enough.
+      _fitLegend: function () {
+        var box = this._legendEl, map = this._map;
+        if (!box || !box.style || !map) return;
+        try {
+          var cont = map.getContainer(), top = cont.getBoundingClientRect().top;
+          var tl = cont.querySelector('.leaflet-top.leaflet-left');
+          var kids = tl ? tl.children : [];
+          for (var i = 0; i < kids.length; i++) {
+            var r = kids[i].getBoundingClientRect();
+            if (r.height > 0 && r.bottom > top) top = r.bottom;
+          }
+          var avail = Math.floor(box.getBoundingClientRect().bottom - top - LEGEND_GAP);
+          box.style.maxHeight = Math.max(LEGEND_MIN_H, avail) + 'px';
+        } catch (_) { /* not laid out (no map container): leave it */ }
       },
 
       _renderLegend: function () {
@@ -1298,10 +1328,11 @@
         var head = el('button', 'mc-duct-legend-title', 'Tropospheric ducting');
         head.type = 'button';
         head.setAttribute('aria-expanded', this._legendOpen ? 'true' : 'false');
-        head.addEventListener('click', function () { self._legendOpen = !self._legendOpen; self._renderLegend(); });
+        head.addEventListener('click', function () { self._legendOpen = !self._legendOpen; self._refocus = 'title'; self._renderLegend(); });
         box.appendChild(head);
         this._linkCountEl = null;
-        if (!this._legendOpen) return;
+        this._linksToggle = null;
+        if (!this._legendOpen) { this._afterLegend(head); return; }
         var grid = this._gridMode;
         // Grid mode: the meta answer is what is "held"; windows come and go.
         var d = grid ? this._meta : this._data;
@@ -1335,24 +1366,49 @@
           if (d.generatedAt) box.appendChild(el('div', 'mc-duct-legend-meta', 'Updated ' + fmtTime(d.generatedAt)));
         }
         box.appendChild(el('div', 'mc-duct-legend-note', NOTE));
+        this._afterLegend(head);
+      },
+
+      // After a legend rebuild: the toggle that rebuilt it keeps the focus
+      // (its button is a new element), and the height cap is re-measured.
+      _afterLegend: function (head) {
+        var f = this._refocus;
+        this._refocus = null;
+        var target = f === 'title' ? head : f === 'links' ? this._linksToggle : null;
+        if (target && typeof target.focus === 'function') { try { target.focus(); } catch (_) {} }
+        this._fitLegend();
       },
 
       // "Observed long links": the line key, the period summary, how many
       // are drawn at the shown time (kept in _linkCountEl, updated in place
       // when the time moves) and the caveat about positions.
+      // Folded (_linksOpen false; the default on short screens) it keeps
+      // the period summary, the count at the shown time and the caveat,
+      // and drops the line key.
       _linksLegend: function () {
-        var sec = el('div', 'mc-duct-links');
-        sec.appendChild(el('div', 'mc-duct-legend-subtitle', 'Observed long links'));
+        var self = this, sec = el('div', 'mc-duct-links');
+        if (this._linksOpen == null) {
+          var short = false;
+          try { short = !!(window.matchMedia && window.matchMedia(SHORT_SCREEN).matches); } catch (_) {}
+          this._linksOpen = !short;
+        }
         var ld = this._links;
         if (!ld) {
+          sec.appendChild(el('div', 'mc-duct-legend-subtitle', 'Observed long links'));
           sec.appendChild(el('div', 'mc-duct-legend-meta', this._linksState === 'loading' ? 'Loading long links' : 'Long links are not available right now'));
           return sec;
         }
-        var rows = [
+        var tog = el('button', 'mc-duct-legend-title mc-duct-links-toggle', 'Observed long links');
+        tog.type = 'button';
+        tog.setAttribute('aria-expanded', this._linksOpen ? 'true' : 'false');
+        tog.addEventListener('click', function () { self._linksOpen = !self._linksOpen; self._refocus = 'links'; self._renderLegend(); });
+        this._linksToggle = tog;
+        sec.appendChild(tog);
+        var rows = this._linksOpen ? [
           ['mc-duct-swatch-link-duct', 'Heard during a modelled duct along at least half the path'],
           ['mc-duct-swatch-link', 'Heard with less or no modelled duct'],
           ['mc-duct-swatch-link-nodata', 'Dashed: no model data for that time']
-        ];
+        ] : [];
         for (var i = 0; i < rows.length; i++) {
           var r = el('div', 'mc-duct-legend-row');
           r.appendChild(el('span', 'mc-duct-swatch-line ' + rows[i][0]));

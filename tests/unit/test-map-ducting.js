@@ -56,6 +56,7 @@ STOP_VARS['--mc-duct-s3'] = ' rgb(0, 200, 200) ';   // rgb() form too
 const STOPS = STOP_N.map((g, k) => ({ g, rgb: STOP_RGB[k] }));
 
 const queue = [];
+const FOCUSED = [];   // elements focus() was called on, in order
 function test(name, fn) { queue.push([name, fn]); }
 
 // ── fakes ───────────────────────────────────────────────────────────────────
@@ -70,6 +71,7 @@ function makeEl(tag) {
     addEventListener(t, f) { (listeners[t] = listeners[t] || []).push(f); },
     removeEventListener(t, f) { listeners[t] = (listeners[t] || []).filter(x => x !== f); },
     fire(t) { (listeners[t] || []).slice().forEach(f => f({ type: t })); },
+    focus() { FOCUSED.push(el); },
   };
   Object.defineProperty(el, 'textContent', {
     get() { return text + el.children.map(c => c.textContent).join('\n'); },
@@ -2151,6 +2153,102 @@ test('grid: remove aborts fetches, clears timers, removes links; re-add draws th
   assert.ok(s.layer._field && s.map._layers.indexOf(s.layer._field) >= 0, 'held window drawn at once');
   assert.ok(s.stats.fields.length === puts + 1);
   assert.deepStrictEqual(linkLines(s).map(l => l._mcLinks), ['nodata', 'casing', 'duct'], 'held links drawn at once (time T + 3 h)');
+});
+
+const linksToggle = (s) => find(s.layer._legendEl, n => n.tagName === 'button' && /mc-duct-links-toggle/.test(n.className))[0];
+const legendBox = (s) => s.layer._legendEl;
+
+test('grid legend: the long-link line key folds behind a button (aria-expanded); folded keeps summary, count and caveat', async () => {
+  const s = await mountGrid();
+  let tog = linksToggle(s);
+  assert.ok(tog, 'a button, not a plain heading');
+  assert.strictEqual(tog.type, 'button');
+  assert.strictEqual(tog.textContent, 'Observed long links');
+  assert.strictEqual(tog.attrs['aria-expanded'], 'true', 'open by default on a tall screen');
+  assert.ok(legendText(s).indexOf('Heard during a modelled duct along at least half the path') >= 0);
+  FOCUSED.length = 0;
+  tog.fire('click');
+  tog = linksToggle(s);
+  assert.strictEqual(tog.attrs['aria-expanded'], 'false');
+  assert.strictEqual(FOCUSED[FOCUSED.length - 1], tog, 'focus stays on the (rebuilt) toggle');
+  const t = legendText(s);
+  assert.ok(t.indexOf(ctxSummary()) >= 0, 'the summary stays');
+  assert.ok(t.indexOf('Positions are self-reported; a long link can also come from a wrong position.') >= 0, 'the caveat stays');
+  assert.ok(t.indexOf('Heard during a modelled duct') < 0 && t.indexOf('Dashed: no model data') < 0, 'line key folded away');
+  assert.ok(t.indexOf('On the map: 3 links heard within 90 min') >= 0, 'the count at the shown time stays');
+  slide(s, 6);
+  assert.ok(legendText(s).indexOf('On the map: 1 link heard within 90 min') >= 0, 'and follows the slider while folded');
+  assert.strictEqual(linkLines(s).length > 0, true, 'lines on the map are unaffected');
+  linksToggle(s).fire('click');
+  assert.strictEqual(linksToggle(s).attrs['aria-expanded'], 'true');
+  assert.ok(legendText(s).indexOf('Heard during a modelled duct along at least half the path') >= 0, 'line key back');
+  // The state survives a legend rebuild (links refresh) and a fold of the whole legend.
+  linksToggle(s).fire('click');
+  s.layer._renderLegend();
+  assert.strictEqual(linksToggle(s).attrs['aria-expanded'], 'false');
+  const head = find(legendBox(s), n => n.tagName === 'button' && n.className === 'mc-duct-legend-title')[0];
+  head.fire('click');
+  assert.strictEqual(linksToggle(s), undefined, 'legend folded: no links section');
+  assert.strictEqual(FOCUSED[FOCUSED.length - 1].className, 'mc-duct-legend-title', 'focus stays on the title toggle');
+  find(legendBox(s), n => n.className === 'mc-duct-legend-title')[0].fire('click');
+  assert.strictEqual(linksToggle(s).attrs['aria-expanded'], 'false');
+});
+
+test('grid legend: long-link details start folded on a short screen (max-height 820px), open on a tall one', async () => {
+  const s = makeGridSandbox();
+  s.ctx.matchMedia = (q) => ({ matches: q === '(max-height: 820px)' });
+  const map = makeGridMap();
+  const layer = s.ctx.MC_createDuctingLayer({});
+  layer.onAdd(map);
+  Object.assign(s, { map, layer });
+  callsTo(s, '/api/ducting/meta')[0].ok(clone(GMETA)); await settle();
+  callsTo(s, '/api/ducting/links')[0].ok(clone(GLINKS)); await settle();
+  assert.strictEqual(linksToggle(s).attrs['aria-expanded'], 'false');
+  assert.ok(legendText(s).indexOf(ctxSummary()) >= 0);
+  assert.ok(find(legendBox(s), n => n.className === 'mc-duct-legend-title')[0].attrs['aria-expanded'] === 'true', 'the legend itself stays open (it is not narrow)');
+  // No links answer yet: a plain heading with the status, no toggle.
+  const p = await mountGrid({ links: false });
+  assert.strictEqual(linksToggle(p), undefined);
+  assert.ok(legendText(p).indexOf('Loading long links') >= 0);
+});
+
+test('grid legend: height capped to end 10 px below the lowest top-left control; never under 40 px; re-measured on render', async () => {
+  const s = await mountGrid();
+  const box = legendBox(s);
+  let bottom = 700;
+  box.getBoundingClientRect = () => ({ bottom });
+  const kids = [
+    { getBoundingClientRect: () => ({ bottom: 152, height: 90 }) },    // zoom
+    { getBoundingClientRect: () => ({ bottom: 210, height: 48 }) },    // layers picker
+    { getBoundingClientRect: () => ({ bottom: 400, height: 0 }) },     // hidden control: ignored
+  ];
+  s.map.getContainer = () => ({
+    getBoundingClientRect: () => ({ top: 52 }),
+    querySelector: (q) => (q === '.leaflet-top.leaflet-left' ? { children: kids } : null),
+  });
+  s.layer._fitLegend();
+  assert.strictEqual(box.style.maxHeight, '480px', '700 - 210 - 10');
+  bottom = 230;
+  s.layer._renderLegend();
+  assert.strictEqual(box.style.maxHeight, '40px', 'floor: the title row stays visible');
+  // No top-left controls: up to the map's top.
+  kids.length = 0;
+  bottom = 700;
+  s.ctx.dispatch('resize');
+  s.map.fire('resize');
+  assert.strictEqual(box.style.maxHeight, String(700 - 52 - 10) + 'px', 'map resize re-measures');
+  // A map without a container (not laid out) leaves it alone and does not throw.
+  s.map.getContainer = () => { throw new Error('gone'); };
+  assert.doesNotThrow(() => s.layer._fitLegend());
+});
+
+test('grid legend: the wheel scrolls the capped legend, not the map', () => {
+  const s = makeGridSandbox();
+  const seen = [];
+  s.ctx.L.DomEvent = { disableClickPropagation() {}, disableScrollPropagation(b) { seen.push(b); } };
+  const layer = s.ctx.MC_createDuctingLayer({});
+  layer.onAdd(makeGridMap());
+  assert.ok(seen.indexOf(layer._legendEl) >= 0);
 });
 
 test('grid: Open-Meteo source keeps the old path (/api/ducting, edge line, no links)', async () => {

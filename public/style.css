@@ -5762,6 +5762,9 @@ body { touch-action: pan-y; }
   line-height: 1.4;
   max-width: 260px;
 }
+/* Height capped by map-ducting.js (_fitLegend) so it never covers the
+ * controls above it; the rest scrolls. */
+.mc-duct-legend { overflow-y: auto; overscroll-behavior: contain; }
 .mc-duct-legend-title {
   display: block;
   width: 100%;
@@ -5824,6 +5827,7 @@ body { touch-action: pan-y; }
 /* Observed long links (grid mode): legend section, line swatches, popup. */
 .mc-duct-links { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--mc-route-legend-border); }
 .mc-duct-legend-subtitle { font-weight: 600; margin-bottom: 4px; }
+.mc-duct-links-toggle[aria-expanded="false"] { margin-bottom: 4px; }
 .mc-duct-links-summary { margin-top: 4px; }
 .mc-duct-swatch-line { flex: none; width: 18px; height: 0; border-top: 3px solid var(--mc-duct-link); }
 .mc-duct-swatch-link-duct { border-top-color: var(--mc-duct-link-duct); border-top-width: 4px; }
