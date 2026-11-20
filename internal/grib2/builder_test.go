@@ -1,111 +1,48 @@
 package grib2
 
 import (
-	"encoding/binary"
-	"math"
+	"time"
+
+	"github.com/meshcore-analyzer/grib2/grib2test"
 )
 
-// A minimal GRIB2 encoder for tests: it builds small synthetic messages so
-// the negative tests can corrupt one field at a time.
+// Short names for the shared GRIB2 test builder (grib2test) and the fixed
+// sections the negative tests corrupt one field at a time.
 
-func sec(n byte, body ...[]byte) []byte {
-	l := 5
-	for _, b := range body {
-		l += len(b)
-	}
-	out := binary.BigEndian.AppendUint32(nil, uint32(l))
-	out = append(out, n)
-	for _, b := range body {
-		out = append(out, b...)
-	}
-	return out
+var (
+	sec           = grib2test.Sec
+	be32          = grib2test.Be32
+	assemble      = grib2test.Assemble
+	noBitmap      = grib2test.NoBitmap
+	sectionOffset = grib2test.SectionOffset
+)
+
+// bitWriter adapts grib2test.BitWriter to the names the decoder tests use.
+type bitWriter struct {
+	w   grib2test.BitWriter
+	buf []byte
 }
 
-func be16(v uint16) []byte { return binary.BigEndian.AppendUint16(nil, v) }
-func be32(v uint32) []byte { return binary.BigEndian.AppendUint32(nil, v) }
+func (b *bitWriter) put(v uint64, n uint) { b.w.Put(v, n); b.buf = b.w.Buf }
 
-// sm16/sm32 encode sign-magnitude integers.
-func sm16(v int) []byte {
-	if v < 0 {
-		return be16(uint16(-v) | 0x8000)
-	}
-	return be16(uint16(v))
-}
+// testRef is the reference time of every test message: 2026-11-19 18:00 UTC.
+var testRef = time.Date(2026, 11, 19, 18, 0, 0, 0, time.UTC)
 
-func sm32(v int64) []byte {
-	if v < 0 {
-		return be32(uint32(-v) | 0x80000000)
-	}
-	return be32(uint32(v))
-}
+func testSec1() []byte { return grib2test.Sec1(testRef) }
 
-func cat(parts ...[]byte) []byte {
-	var out []byte
-	for _, p := range parts {
-		out = append(out, p...)
-	}
-	return out
-}
-
-// assemble wraps sections 1..7 in section 0 and the end marker.
-func assemble(secs ...[]byte) []byte {
-	body := cat(secs...)
-	total := uint64(16 + len(body) + 4)
-	out := append([]byte("GRIB"), 0, 0, 0, 2)
-	out = binary.BigEndian.AppendUint64(out, total)
-	out = append(out, body...)
-	return append(out, "7777"...)
-}
-
-func testSec1() []byte {
-	// centre 7, subcentre 0, master 2, local 1, significance 1,
-	// 2026-11-19 18:00:00, status 0, type 1
-	return sec(1, be16(7), be16(0), []byte{2, 1, 1}, be16(2026), []byte{11, 19, 18, 0, 0, 0, 1})
-}
-
+// testSec3 is a 1° lattice of ni x nj points from 90N 0E.
 func testSec3(ni, nj uint32, scan byte) []byte {
-	return sec(3,
-		[]byte{0}, be32(ni*nj), []byte{0, 0}, be16(0), // source, points, optional list, template 3.0
-		[]byte{6}, make([]byte, 15), // earth shape + radius/axes (unused)
-		be32(ni), be32(nj), be32(0), be32(math.MaxUint32), // Ni, Nj, basic angle, subdivisions
-		sm32(90000000), sm32(0), []byte{0x30}, // La1, Lo1, resolution flags
-		sm32(-90000000), sm32(359000000), // La2, Lo2
-		be32(1000000), be32(1000000), []byte{scan}) // Di, Dj, scanning mode
+	return grib2test.Sec3(grib2test.Lattice{Ni: ni, Nj: nj, La1: 90000000, Lo1: 0, Di: 1000000, Dj: 1000000, Scan: scan})
 }
 
+// testSec4 is TMP at 850 hPa, 6 hour forecast.
 func testSec4() []byte {
-	return sec(4, be16(0), be16(0), // NV, template 4.0
-		[]byte{0, 0, 2, 0, 96}, be16(0), []byte{0}, // TMP, process ids, cutoff
-		[]byte{1}, be32(6), // hours, 6
-		[]byte{100, 0}, be32(85000), // isobaric 85000 Pa
-		[]byte{255, 0}, be32(0))
+	return grib2test.Sec4(grib2test.Product{Category: 0, Number: 0, ForecastHour: 6, SurfaceType: 100, SurfaceValue: 85000})
 }
 
 func testSec5Simple(npts uint32, r float32, e, d int, nbits byte) []byte {
-	return sec(5, be32(npts), be16(0), be32(math.Float32bits(r)), sm16(e), sm16(d), []byte{nbits, 0})
+	return grib2test.Sec5Simple(npts, r, e, d, nbits)
 }
-
-func noBitmap() []byte { return sec(6, []byte{255}) }
-
-// bitWriter packs big-endian bit fields.
-type bitWriter struct {
-	buf  []byte
-	nbit uint
-}
-
-func (w *bitWriter) put(v uint64, n uint) {
-	for i := int(n) - 1; i >= 0; i-- {
-		if w.nbit%8 == 0 {
-			w.buf = append(w.buf, 0)
-		}
-		if v>>uint(i)&1 != 0 {
-			w.buf[len(w.buf)-1] |= 0x80 >> (w.nbit % 8)
-		}
-		w.nbit++
-	}
-}
-
-func (w *bitWriter) align() { w.nbit = uint(len(w.buf)) * 8 }
 
 // simpleMessage is a 5.0 message of ni x nj points holding vals with nbits.
 func simpleMessage(ni, nj uint32, vals []uint64, nbits byte) []byte {
@@ -149,61 +86,45 @@ func (c complexSpec) sec5() []byte {
 	if c.order > 0 {
 		tmpl = 3
 	}
-	body := cat(be32(npts), be16(tmpl), be32(0), sm16(0), sm16(0), []byte{c.nbits, 0},
-		[]byte{1, c.mvm}, be32(0), be32(0), be32(uint32(len(c.refs))),
-		[]byte{c.widthRef, c.widthBits}, be32(c.lenRef), []byte{c.lenIncr}, be32(c.lastLen), []byte{c.lenBits})
+	body := grib2test.Cat(grib2test.Be32(npts), grib2test.Be16(tmpl), grib2test.Be32(0), grib2test.Sm16(0), grib2test.Sm16(0), []byte{c.nbits, 0},
+		[]byte{1, c.mvm}, grib2test.Be32(0), grib2test.Be32(0), grib2test.Be32(uint32(len(c.refs))),
+		[]byte{c.widthRef, c.widthBits}, grib2test.Be32(c.lenRef), []byte{c.lenIncr}, grib2test.Be32(c.lastLen), []byte{c.lenBits})
 	if c.order > 0 {
 		body = append(body, c.order, c.octets)
 	}
-	return sec(5, body)
+	return grib2test.Sec(5, body)
 }
 
 func (c complexSpec) sec7() []byte {
-	var w bitWriter
+	var w grib2test.BitWriter
 	for _, d := range c.descrip {
 		n := uint(c.octets) * 8
 		v := uint64(d)
 		if d < 0 {
 			v = uint64(-d) | 1<<(n-1)
 		}
-		w.put(v, n)
+		w.Put(v, n)
 	}
 	for _, r := range c.refs {
-		w.put(r, uint(c.nbits))
+		w.Put(r, uint(c.nbits))
 	}
-	w.align()
+	w.Align()
 	for _, x := range c.widths {
-		w.put(x, uint(c.widthBits))
+		w.Put(x, uint(c.widthBits))
 	}
-	w.align()
+	w.Align()
 	for _, x := range c.lens {
-		w.put(x, uint(c.lenBits))
+		w.Put(x, uint(c.lenBits))
 	}
-	w.align()
+	w.Align()
 	for g, vs := range c.values {
 		for _, v := range vs {
-			w.put(v, c.valWidths[g])
+			w.Put(v, c.valWidths[g])
 		}
 	}
-	return sec(7, w.buf)
+	return grib2test.Sec(7, w.Buf)
 }
 
 func (c complexSpec) message() []byte {
-	return assemble(testSec1(), testSec3(c.ni, c.nj, 0), testSec4(), c.sec5(), noBitmap(), c.sec7())
-}
-
-// sectionOffset returns the offset of section n within msg (or -1).
-func sectionOffset(msg []byte, n byte) int {
-	off := 16
-	for off+5 <= len(msg)-4 {
-		l := int(binary.BigEndian.Uint32(msg[off:]))
-		if msg[off+4] == n {
-			return off
-		}
-		if l < 5 {
-			return -1
-		}
-		off += l
-	}
-	return -1
+	return grib2test.Assemble(testSec1(), testSec3(c.ni, c.nj, 0), testSec4(), c.sec5(), noBitmap(), c.sec7())
 }

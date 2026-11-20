@@ -50,6 +50,28 @@ func (s *Store) LatestDuctingRun(model string) (int64, error) {
 	return run, err
 }
 
+// DuctingRunLeads returns the lead hours stored for one run of the model,
+// ascending.
+func (s *Store) DuctingRunLeads(model string, runTime int64) ([]int, error) {
+	var leads []int
+	err := s.WriterTx("ducting_grid_leads", func(tx *sql.Tx) error {
+		rows, err := tx.Query(`SELECT lead_hours FROM ducting_grid WHERE model = ? AND run_time = ? ORDER BY lead_hours`, model, runTime)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var l int
+			if err := rows.Scan(&l); err != nil {
+				return err
+			}
+			leads = append(leads, l)
+		}
+		return rows.Err()
+	})
+	return leads, err
+}
+
 // PruneDuctingGrid deletes the model's steps with valid_time < before and
 // returns how many rows went.
 func (s *Store) PruneDuctingGrid(model string, before int64) (int64, error) {

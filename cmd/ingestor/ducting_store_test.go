@@ -137,3 +137,27 @@ func TestDuctingGridBlobRoundTrip(t *testing.T) {
 		}
 	})
 }
+
+func TestDuctingGridRunLeads(t *testing.T) {
+	forEachDuctingBackend(t, func(t *testing.T, s *Store) {
+		leads, err := s.DuctingRunLeads("gfs", 100)
+		if err != nil || len(leads) != 0 {
+			t.Fatalf("empty: %v %v", leads, err)
+		}
+		for _, r := range []struct {
+			valid, run int64
+			lead       int
+		}{{106, 100, 6}, {100, 100, 0}, {103, 100, 3}, {109, 200, 9}} {
+			if _, err := s.UpsertDuctingGrid("gfs", r.valid, r.run, r.lead, []byte("x"), 1); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := s.UpsertDuctingGrid("icon", 112, 100, 12, []byte("x"), 1); err != nil {
+			t.Fatal(err)
+		}
+		leads, err = s.DuctingRunLeads("gfs", 100)
+		if err != nil || len(leads) != 3 || leads[0] != 0 || leads[1] != 3 || leads[2] != 6 {
+			t.Fatalf("leads %v %v", leads, err)
+		}
+	})
+}
