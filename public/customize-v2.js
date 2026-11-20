@@ -55,6 +55,9 @@
     sectionBg: '--section-bg',
     cardBg: '--card-bg', contentBg: '--content-bg', detailBg: '--detail-bg',
     inputBg: '--input-bg', rowStripe: '--row-stripe', rowHover: '--row-hover', selectedBg: '--selected-bg',
+    ductS1: '--mc-duct-s1', ductS2: '--mc-duct-s2', ductS3: '--mc-duct-s3', ductS4: '--mc-duct-s4',
+    ductS5: '--mc-duct-s5', ductS6: '--mc-duct-s6', ductS7: '--mc-duct-s7', ductS8: '--mc-duct-s8',
+    ductLora: '--mc-duct-lora', ductEdge: '--mc-duct-edge', ductLink: '--mc-duct-link', ductLinkDuct: '--mc-duct-link-duct',
     font: '--font', mono: '--mono'
   };
 
@@ -306,6 +309,10 @@
     surface1: 'Cards', surface2: 'Panels', surface3: 'Tertiary Surface', sectionBg: 'Section Header', cardBg: 'Card Fill', contentBg: 'Content Area',
     detailBg: 'Detail Panels', inputBg: 'Inputs', rowStripe: 'Table Stripe',
     rowHover: 'Row Hover', selectedBg: 'Selected',
+    ductS1: 'Ducting band 1 (weakest)', ductS2: 'Ducting band 2', ductS3: 'Ducting band 3',
+    ductS4: 'Ducting band 4', ductS5: 'Ducting band 5', ductS6: 'Ducting band 6', ductS7: 'Ducting band 7',
+    ductS8: 'Ducting band 8 (strongest)', ductLora: 'Ducting LoRa outline', ductEdge: 'Ducting forecast edge',
+    ductLink: 'Long link', ductLinkDuct: 'Long link during a duct',
     font: 'Body Font', mono: 'Mono Font'
   };
 
@@ -385,6 +392,7 @@
 
   var BASIC_KEYS = ['accent', 'navBg', 'navText', 'background', 'text', 'statusGreen', 'statusYellow', 'statusRed'];
   var ADVANCED_KEYS = ['accentHover', 'navBg2', 'navTextMuted', 'navActiveBg', 'textMuted', 'border', 'surface1', 'surface2', 'cardBg', 'contentBg', 'detailBg', 'inputBg', 'rowStripe', 'rowHover', 'selectedBg'];
+  var DUCT_KEYS = ['ductS1', 'ductS2', 'ductS3', 'ductS4', 'ductS5', 'ductS6', 'ductS7', 'ductS8', 'ductLora', 'ductEdge', 'ductLink', 'ductLinkDuct'];
   var FONT_KEYS = ['font', 'mono'];
 
   // ── Validation helpers ──
@@ -1228,9 +1236,25 @@
     }).join('') + '</div>';
   }
 
+  // A key no preset defines (the ducting overlay colours) shows the colour
+  // the stylesheet applies, as #rrggbb for the colour input; '' when the
+  // variable is unset or unreadable.
+  function _cssVarHex(cssVar) {
+    if (!cssVar || typeof getComputedStyle !== 'function' || typeof document === 'undefined') return '';
+    var raw = '';
+    try { raw = getComputedStyle(document.documentElement).getPropertyValue(cssVar).trim(); } catch (e) { return ''; }
+    if (/^#[0-9a-f]{6}$/i.test(raw)) return raw.toLowerCase();
+    if (/^#[0-9a-f]{3}$/i.test(raw)) return ('#' + raw[1] + raw[1] + raw[2] + raw[2] + raw[3] + raw[3]).toLowerCase();
+    var m = /^rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)/i.exec(raw);
+    if (!m) return '';
+    var hex = '#';
+    for (var i = 1; i <= 3; i++) hex += ('0' + Math.min(255, Number(m[i])).toString(16)).slice(-2);
+    return hex;
+  }
+
   function _renderColorRow(key, section, effectiveVal, serverDefault) {
     var isFont = key === 'font' || key === 'mono';
-    var val = effectiveVal || '';
+    var val = effectiveVal || (isFont ? '' : _cssVarHex(THEME_CSS_MAP[key]));
     var def = serverDefault || '';
     var dot = _overrideDot(section, key);
     var inputHtml;
@@ -1329,6 +1353,8 @@
     for (var i = 0; i < BASIC_KEYS.length; i++) basicRows += _renderColorRow(BASIC_KEYS[i], section, current[BASIC_KEYS[i]], serverCurrent[BASIC_KEYS[i]]);
     var advancedRows = '';
     for (var j = 0; j < ADVANCED_KEYS.length; j++) advancedRows += _renderColorRow(ADVANCED_KEYS[j], section, current[ADVANCED_KEYS[j]], serverCurrent[ADVANCED_KEYS[j]]);
+    var ductRows = '';
+    for (var d = 0; d < DUCT_KEYS.length; d++) ductRows += _renderColorRow(DUCT_KEYS[d], section, current[DUCT_KEYS[d]], serverCurrent[DUCT_KEYS[d]]);
     var fontRows = '';
     for (var f = 0; f < FONT_KEYS.length; f++) fontRows += _renderColorRow(FONT_KEYS[f], section, current[FONT_KEYS[f]], serverCurrent[FONT_KEYS[f]]);
 
@@ -1338,6 +1364,7 @@
       '<p style="font-size:11px;color:var(--text-muted);margin:0 0 10px">Toggle ' + renderConfigGlyph('ph:sun') + '/' + renderConfigGlyph('ph:moon') + ' in nav to edit the other mode.</p>' +
       basicRows +
       '<details class="cust-advanced"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Advanced (' + ADVANCED_KEYS.length + ' options)</summary>' + advancedRows + '</details>' +
+      '<details class="cust-ducting" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Ducting overlay (' + DUCT_KEYS.length + ' options)</summary>' + ductRows + '</details>' +
       '<details class="cust-fonts" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Fonts</summary>' + fontRows + '</details>' +
     '</div>';
   }
@@ -3015,6 +3042,8 @@
     // #1380 — exposed for unit tests; see test-issue-1380-*.
     applyCbSim: _applyCbSim,
     resetCbPreset: _resetCbPreset,
+    // Exposed for tests: the swatch fallback for keys no preset defines.
+    cssVarHex: _cssVarHex,
     THEME_CSS_MAP: THEME_CSS_MAP
   };
 })();
