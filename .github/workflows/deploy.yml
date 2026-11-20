@@ -824,7 +824,7 @@ jobs:
             "port": 13596,
             "planner": { "enabled": true, "defaultRangeKm": 30, "newAntennaM": 10,
                          "existingAntennaM": 20, "maxAreaKm": 100, "nodeMarginKm": 20, "maxLegKm": 100 },
-            "ducting": { "enabled": true, "baseUrl": "http://127.0.0.1:13597",
+            "ducting": { "enabled": true, "source": "open-meteo", "baseUrl": "http://127.0.0.1:13597",
                          "gridStepDeg": 0.5, "forecastHours": 48 }
           }
           JSON
@@ -846,6 +846,39 @@ jobs:
             if curl -sf http://localhost:13596/api/ducting | grep -q '"status":"ok"'; then echo "ducting forecast ok after $((i*5))s"; break; fi
             if [ "$i" -eq 60 ]; then echo "no ducting forecast within 300s"; curl -s http://localhost:13596/api/ducting | head -c 500; exit 1; fi
             sleep 5
+          done
+
+      - name: Start ducting E2E server (stored global grid)
+        # test-map-ducting-grid-e2e.js: a server on :13598 with the default
+        # ducting source, gfs-grid, which only reads table ducting_grid. The
+        # ingestor's fixture generator (cmd/ingestor/ducting_e2e_fixture_test.go)
+        # writes it into an own copy of the fixture through the ingestor's own
+        # write paths, relative to now (steps 48 h back to 48 h ahead, so the
+        # slider has past and forecast times), plus two long links (signed
+        # zero-hop adverts). The sqlite3 cgo build is shared with the server
+        # build above, so this compiles only the ingestor test package.
+        if: matrix.shard == 1
+        run: |
+          fuser -k 13598/tcp 2>/dev/null || true
+          rm -rf /tmp/cs-ducting-grid
+          mkdir -p /tmp/cs-ducting-grid
+          cp test-fixtures/e2e-fixture.db /tmp/cs-ducting-grid/e2e-fixture.db
+          (cd cmd/ingestor && go test -count=1 -run '^TestDuctingE2EFixture$' . \
+            -args -ducting-e2e-fixture=/tmp/cs-ducting-grid/e2e-fixture.db)
+          cat > /tmp/cs-ducting-grid/config.json <<'JSON'
+          {
+            "port": 13598,
+            "planner": { "enabled": true, "defaultRangeKm": 30, "newAntennaM": 10,
+                         "existingAntennaM": 20, "maxAreaKm": 100, "nodeMarginKm": 20, "maxLegKm": 100 },
+            "ducting": { "enabled": true, "source": "gfs-grid" }
+          }
+          JSON
+          ./corescope-server -config-dir /tmp/cs-ducting-grid -port 13598 -db /tmp/cs-ducting-grid/e2e-fixture.db -public public-instrumented &
+          echo $! > .server-ducting-grid.pid
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:13598/api/ducting/meta | grep -q '"status":"ok"'; then echo "ducting grid server ready after ${i}s"; break; fi
+            if [ "$i" -eq 30 ]; then echo "ducting grid server not ready within 30s"; curl -s http://localhost:13598/api/ducting/meta | head -c 500; exit 1; fi
+            sleep 1
           done
 
       - name: Run Playwright E2E tests (fail-fast)
@@ -1033,6 +1066,7 @@ jobs:
           suite 2 test-show-neighbors.js BASE_URL=$B
           suite 3 test-user-management-e2e.js BASE_URL=http://localhost:13582 BASE_URL_OFF=$B
           suite 1 test-map-ducting-e2e.js CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13596
+          suite 1 test-map-ducting-grid-e2e.js CHROMIUM_REQUIRE=1 BASE_URL=http://localhost:13598
 
       # #1616: slide-over focus-restore flake-gate. Runs the slide-over
       # E2E 3 more times against the SAME backend instance (it already
@@ -1091,7 +1125,7 @@ jobs:
             kill $(cat .server-um.pid) 2>/dev/null || true
             rm -f .server-um.pid
           fi
-          for f in .server-split.pid .static-split.pid .server-ducting.pid .fake-ducting.pid; do
+          for f in .server-split.pid .static-split.pid .server-ducting.pid .fake-ducting.pid .server-ducting-grid.pid; do
             if [ -f "$f" ]; then kill $(cat "$f") 2>/dev/null || true; rm -f "$f"; fi
           done
 

@@ -1,0 +1,529 @@
+/**
+ * E2E for the tropospheric-ducting overlay with the stored global grid
+ * (ducting.source "gfs-grid", the default): GET /api/ducting/meta, the
+ * windows of /api/ducting/grid, the history/forecast time slider, the
+ * duct=1&ductT deep link and the observed long links of /api/ducting/links,
+ * against a real CoreScope server. The Open-Meteo source has its own suite
+ * (test-map-ducting-e2e.js); both share tests/e2e/lib/ducting-e2e.js.
+ *
+ * The server only reads table ducting_grid; the ingestor writes it. The
+ * fixture comes from the ingestor's own write path, relative to now, so the
+ * slider always has past ("analysis") and future ("forecast") steps:
+ * cmd/ingestor/ducting_e2e_fixture_test.go writes 33 steps (48 h back to
+ * 48 h ahead, every 3 h) over the fixture's nodes and two long links (signed
+ * zero-hop ADVERTs heard directly ~110 km away): one during a modelled
+ * surface duct whose sender is named EVIL_NAME below, one without a duct
+ * named PLAIN_NAME. Keep these names in step with that file.
+ *
+ * CI: GitHub Actions E2E job (.github/workflows/deploy.yml, e2e shard 1),
+ * server on 13598, `suite 1 test-map-ducting-grid-e2e.js`.
+ *
+ * Locally (the fixture must be migrated first, as CI does; see AGENTS.md):
+ *
+ *   mkdir -p /tmp/ducting-grid && cp test-fixtures/e2e-fixture.db /tmp/ducting-grid/
+ *   (cd cmd/ingestor && go test -count=1 -run '^TestDuctingE2EFixture$' . \
+ *       -args -ducting-e2e-fixture=/tmp/ducting-grid/e2e-fixture.db)
+ *   cat > /tmp/ducting-grid/config.json <<'JSON'
+ *   { "port": 13598,
+ *     "planner": { "enabled": true, "defaultRangeKm": 30, "newAntennaM": 10,
+ *                  "existingAntennaM": 20, "maxAreaKm": 100, "nodeMarginKm": 20, "maxLegKm": 100 },
+ *     "ducting": { "enabled": true, "source": "gfs-grid" } }
+ *   JSON
+ *   corescope-server -config-dir /tmp/ducting-grid -db /tmp/ducting-grid/e2e-fixture.db -port 13598 -public public &
+ *   BASE_URL=http://localhost:13598 node tests/e2e/test-map-ducting-grid-e2e.js
+ *
+ * Env:
+ *   BASE_URL       CoreScope server (default http://localhost:13598)
+ *   CHROMIUM_PATH  optional browser binary
+ */
+'use strict';
+const { chromium } = require('playwright');
+const DE = require('./lib/ducting-e2e');
+const { loraFreqsOf, assert, sleep, openPicker, setOverlayUi, pageState, inPageOverlaps, cssVars,
+  inPageFieldProbe, fieldProblems, outlineProblems, pointsIn, setSlider } = DE;
+
+const BASE = (process.env.BASE_URL || 'http://localhost:13598').replace(/\/+$/, '');
+const EVIL_NAME = '<img src=x onerror=__dx=1>&"Q"';
+const PLAIN_NAME = 'E2E Duct Far Repeater';
+const LINK_WINDOW_S = 90 * 60;   // map-ducting.js LINK_WINDOW_S
+const LINK_DUCT_FRAC = 0.5;      // map-ducting.js LINK_DUCT_FRAC
+const newPage = (browser, opts) => DE.newPage(browser, BASE, opts);
+const gotoRoute = (page, hash, waitControl) => DE.gotoRoute(page, BASE, hash, waitControl);
+const R = DE.createRunner();
+const test = R.test;
+
+async function getJson(path) {
+  const r = await fetch(BASE + path, { signal: AbortSignal.timeout(20000) });
+  if (!r.ok) throw new Error(`${path} -> HTTP ${r.status}`);
+  return r.json();
+}
+
+// Latest time <= now, else the first (map-ducting.js ductTimeIndex).
+function defaultIndex(times) {
+  const now = Date.now() / 1000;
+  let best = 0;
+  times.forEach((t, i) => { if (t <= now) best = i; });
+  return best;
+}
+
+// The links drawn at time t: a reception within +-90 min; kind of the
+// nearest one ('duct' at >= half the path ducted, 'plain' below, 'nodata'
+// without a stored step). The test's own reading of the endpoint contract.
+function expectedLinks(links, t) {
+  const out = [];
+  for (const l of links) {
+    const near = l.receptions.filter(r => Math.abs(r.t - t) <= LINK_WINDOW_S)
+      .sort((x, y) => (Math.abs(x.t - t) - Math.abs(y.t - t)) || (x.t - y.t));
+    if (!near.length) continue;
+    const f = near[0].ductFrac;
+    out.push({ link: l, kind: !(f >= 0) ? 'nodata' : f >= LINK_DUCT_FRAC ? 'duct' : 'plain' });
+  }
+  return out;
+}
+const segKey = (pts) => pts.map(p => p.map(v => v.toFixed(5)).join(',')).join(';');
+const linkKey = (l) => segKey([[l.a.lat, l.a.lon], [l.b.lat, l.b.lon]]);
+
+// ── In-page probes ──────────────────────────────────────────────────────────
+const firstMap = 'window.__mcHarness.maps.filter(x => x._container && x._container.isConnected && x._loaded)[0]';
+
+// The overlay layer's window data (the cells drawn) and what it shows.
+function inPageLayer() {
+  const m = window.__mcHarness.maps.filter(x => x._container && x._container.isConnected && x._loaded)[0];
+  let layer = null;
+  if (m) m.eachLayer((l) => { if (l._mcDuct) layer = l; });
+  if (!layer) return null;
+  const d = layer._data;
+  return {
+    data: d ? { stepDeg: d.stepDeg, times: d.times, cells: d.cells } : null,
+    sel: layer._sel,
+    shownT: layer._shownT,
+    gridMode: layer._gridMode,
+    linksState: layer._linksState,
+  };
+}
+
+// The drawn link polylines by kind: { kind: [[ [lat, lon], [lat, lon] ], ...] }.
+function inPageLinks() {
+  const m = window.__mcHarness.maps.filter(x => x._container && x._container.isConnected && x._loaded)[0];
+  const out = {};
+  m.eachLayer((l) => {
+    if (!l._mcLinks) return;
+    out[l._mcLinks] = (out[l._mcLinks] || []).concat(l.getLatLngs().map(p => p.map(ll => [ll.lat, ll.lng])));
+    out[l._mcLinks + 'Style'] = { interactive: l.options.interactive, dash: l.options.dashArray || null, pane: l._renderer && l._renderer.options.pane };
+  });
+  return out;
+}
+
+const fieldSum = async (page) => (await page.evaluate(inPageFieldProbe, { idx: 0, cells: [] })).sum;
+const sliderState = (page) => page.evaluate(() => {
+  const s = document.querySelector('.mc-duct-time input[type=range]');
+  const l = document.querySelector('.mc-duct-time-label');
+  return s ? { value: +s.value, max: +s.max, disabled: s.disabled, valuetext: s.getAttribute('aria-valuetext'), label: l && l.textContent } : null;
+});
+const hashParams = (page) => page.evaluate(() => {
+  const q = location.hash.split('?')[1] || '';
+  const o = {};
+  q.split('&').filter(Boolean).forEach((kv) => { const i = kv.indexOf('='); o[decodeURIComponent(i < 0 ? kv : kv.slice(0, i))] = i < 0 ? '' : decodeURIComponent(kv.slice(i + 1)); });
+  return o;
+});
+async function waitHash(page, want, timeout) {
+  await page.waitForFunction((w) => {
+    const q = location.hash.split('?')[1] || '';
+    const o = {};
+    q.split('&').filter(Boolean).forEach((kv) => { const i = kv.indexOf('='); o[decodeURIComponent(i < 0 ? kv : kv.slice(0, i))] = i < 0 ? '' : decodeURIComponent(kv.slice(i + 1)); });
+    return Object.keys(w).every(k => (w[k] === null ? !(k in o) : o[k] === w[k]));
+  }, want, { timeout: timeout || 5000 });
+}
+
+// Requests to /api/ducting* seen by a page, in order.
+function trackDucting(page) {
+  const seen = [];
+  page.on('request', (r) => {
+    const u = new URL(r.url());
+    if (u.pathname.startsWith('/api/ducting')) seen.push({ path: u.pathname, q: Object.fromEntries(u.searchParams) });
+  });
+  return seen;
+}
+const gridReqs = (seen) => seen.filter(r => r.path === '/api/ducting/grid');
+// Waits until a window for time t is drawn (the layer holds it).
+async function waitWindow(page, t) {
+  await page.waitForFunction((tt) => {
+    const m = window.__mcHarness.maps.filter(x => x._container && x._container.isConnected && x._loaded)[0];
+    let ok = false;
+    if (m) m.eachLayer((l) => { if (l._mcDuct && l._data && l._data.times && l._data.times[0] === tt && l._field) ok = true; });
+    return ok;
+  }, t, { timeout: 20000, polling: 100 });
+}
+
+async function run() {
+  console.log(`\nDucting overlay E2E, stored global grid — ${BASE}\n`);
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: process.env.CHROMIUM_PATH || undefined,
+    args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+  });
+  const pages = [];
+  const track = async (opts) => { const p = await newPage(browser, opts); pages.push(p); return p; };
+
+  try {
+    let cfg, meta, links, freqs = [868, 915];
+    await test('/api/config/client: ducting source gfs-grid with history days, never a baseUrl', async () => {
+      cfg = await getJson('/api/config/client');
+      assert(cfg.ducting && cfg.ducting.source === 'gfs-grid', 'ducting: ' + JSON.stringify(cfg.ducting) + ' (is ducting.source gfs-grid on the server?)');
+      assert(cfg.ducting.model === 'gfs' && cfg.ducting.stepDeg === 0.5 && cfg.ducting.attribution && cfg.ducting.historyDays >= 1, 'incomplete: ' + JSON.stringify(cfg.ducting));
+      assert(!/baseUrl/i.test(JSON.stringify(cfg)), 'client config has a baseUrl');
+    });
+    if (!cfg || !cfg.ducting || cfg.ducting.source !== 'gfs-grid') throw new Error('server is not in gfs-grid mode; see the header for how to start it');
+    freqs = loraFreqsOf(cfg);
+
+    await test('/api/ducting/meta: stored times every 3 h, past and forecast', async () => {
+      meta = await getJson('/api/ducting/meta');
+      assert(meta.status === 'ok', `status ${meta.status} (did the fixture generator run? see the header)`);
+      assert(meta.source === 'gfs-grid' && meta.model === 'gfs' && meta.runTime > 0 && meta.generatedAt > 0 && meta.historyDays === cfg.ducting.historyDays, 'meta: ' + JSON.stringify(Object.assign({}, meta, { times: meta.times.length })));
+      assert(meta.times.length >= 2 && meta.times.every((t, i) => i === 0 || t - meta.times[i - 1] === 3 * 3600), 'times not 3-hourly ascending');
+      const now = Date.now() / 1000;
+      assert(meta.times[0] < now && meta.times[meta.times.length - 1] > now, `times ${meta.times[0]}..${meta.times[meta.times.length - 1]} do not span now ${Math.round(now)}`);
+    });
+    if (!meta || meta.status !== 'ok') throw new Error('no stored grid; run the fixture generator (see the header)');
+    const times = meta.times;
+    const defIdx = defaultIndex(times);
+
+    let evil = null, plain = null, tEvil = 0, tPlain = 0;
+    await test('/api/ducting/links: the seeded long links, one during a modelled duct', async () => {
+      links = await getJson(`/api/ducting/links?days=${cfg.ducting.historyDays}`);
+      assert(links.status === 'ok' && Array.isArray(links.links) && links.days === cfg.ducting.historyDays && links.freqMHz > 0, 'links: ' + JSON.stringify(links).slice(0, 300));
+      evil = links.links.find(l => l.a.name === EVIL_NAME);
+      plain = links.links.find(l => l.a.name === PLAIN_NAME);
+      assert(evil && plain, `seeded links missing (names: ${links.links.map(l => l.a.name).join(' | ')})`);
+      const re = evil.receptions.find(r => r.ductFrac >= LINK_DUCT_FRAC);
+      const rp = plain.receptions.find(r => r.ductFrac >= 0 && r.ductFrac < LINK_DUCT_FRAC);
+      assert(re && rp, 'receptions: ' + JSON.stringify([evil.receptions, plain.receptions]));
+      tEvil = re.t; tPlain = rp.t;
+      assert(times.includes(tEvil) && times.includes(tPlain), 'reception times are not stored steps');
+      assert(evil.distKm > evil.horizonKm && evil.count === 2 && evil.b.name, 'evil link: ' + JSON.stringify(evil).slice(0, 300));
+      const s = links.summary;
+      assert(s.links >= 2 && s.receptions >= 3 && s.withGrid <= s.receptions && s.duringDuct <= s.withGrid && s.baselineDuctFrac >= 0 && s.baselineDuctFrac <= 1, 'summary: ' + JSON.stringify(s));
+    });
+
+    // ── Map page ──
+    const mp = await track({ theme: 'light' });
+    const page = mp.page;
+    const seen = trackDucting(page);
+    let sum0 = 0, data0 = null;
+    await test('map page: overlay entry present, off by default, nothing fetched', async () => {
+      await gotoRoute(page, '#/map');
+      await openPicker(page);
+      const lab = page.locator('.leaflet-control-layers-overlays label[data-tile-overlay-id="ducting"]').first();
+      await lab.waitFor({ state: 'attached', timeout: 20000 });
+      assert(!(await lab.locator('input').isChecked()), 'ducting is on by default');
+      await sleep(300);
+      const st = await pageState(page);
+      assert(st.legends === 0 && st.times === 0 && !st.cells && !st.fields.length, 'overlay drawn while off');
+      assert(!seen.length, 'requests with the overlay off: ' + JSON.stringify(seen));
+    });
+
+    await test('enabling it fetches meta, links and the window of the default time; draws the field, slider and legend', async () => {
+      await setOverlayUi(page, true);
+      await waitWindow(page, times[defIdx]);
+      await page.mouse.move(5, 5);
+      await page.waitForSelector('.mc-duct-legend', { state: 'visible' });
+      assert(seen.some(r => r.path === '/api/ducting/meta'), 'no meta request');
+      assert(seen.some(r => r.path === '/api/ducting/links' && r.q.days === String(cfg.ducting.historyDays)), 'links request: ' + JSON.stringify(seen.filter(r => r.path === '/api/ducting/links')));
+      assert(!seen.some(r => r.path === '/api/ducting'), 'the Open-Meteo endpoint was fetched in grid mode');
+      const g = gridReqs(seen);
+      assert(g.length >= 1 && g.every(r => r.q.t === String(times[defIdx])) && g.every(r => r.q.bbox.split(',').length === 4), 'grid requests: ' + JSON.stringify(g));
+      const L0 = await page.evaluate(inPageLayer);
+      data0 = L0.data;
+      assert(L0.gridMode && L0.sel === defIdx && data0.times.length === 1 && data0.cells.length > 0, `layer sel=${L0.sel} want ${defIdx}, cells ${data0 && data0.cells.length}`);
+      const st = await pageState(page);
+      assert(st.cells === data0.cells.length && st.fields.length === 1 && st.fields[0].inDom && st.fields[0].pane === 'mcDuctFieldPane', `cells=${st.cells} fields=${JSON.stringify(st.fields)}`);
+      assert(!st.interactive.length, 'interactive overlay layers: ' + st.interactive.join(','));
+      assert(!st.edges.length, 'a grid window has an edge line');
+      assert(st.legends === 1 && st.times === 1 && st.legendVisible && st.timeVisible, `legends=${st.legends} times=${st.times}`);
+      assert(/Past times show the model.s analysis/.test(st.legendText) && /Observed long links/.test(st.legendText) && !/Dotted line/.test(st.legendText), 'legend: ' + st.legendText.slice(0, 300));
+      assert(st.legendText.includes(meta.attribution), 'legend lacks the attribution');
+      sum0 = await fieldSum(page);
+    });
+
+    await test('the legend and the time slider cover no other map control', async () => {
+      const ov = await page.evaluate(inPageOverlaps);
+      assert(ov.mine === 2, 'legend and time box not both visible');
+      assert(!ov.hits.length, ov.hits.join('; '));
+    });
+
+    await test('slider spans every stored time, defaults to the latest <= now, labelled analysis', async () => {
+      const s = await sliderState(page);
+      assert(s.max === times.length - 1 && !s.disabled, `slider max ${s.max} want ${times.length - 1}`);
+      assert(s.value === defIdx, `slider at ${s.value} want ${defIdx}`);
+      assert(/^Time: .+ · analysis, (under 1 h|\d+ h) ago$/.test(s.label) && s.valuetext && s.label.endsWith(s.valuetext), 'label: ' + s.label + ' / ' + s.valuetext);
+      const h = await hashParams(page);
+      assert(!('ductT' in h), 'default time written to the URL: ' + JSON.stringify(h));
+    });
+
+    await test('the field matches the window at the default time; LoRa cells, and only they, outlined', async () => {
+      const f = await fieldProblems(page, data0, 0);
+      assert(!f.probs.length, f.probs.slice(0, 5).join(' | '));
+      assert(f.ducts > 0 && f.calm > 0, `ducts=${f.ducts} calm=${f.calm}`);
+      const o = outlineProblems(await pageState(page), data0, 0, (await cssVars(page)).lora, freqs);
+      assert(!o.probs.length, o.probs.slice(0, 5).join(' | '));
+      assert(o.n > 0, 'no LoRa duct in the window');
+    });
+
+    await test('moving the slider to the last forecast time fetches its window, redraws, labels it forecast and links it', async () => {
+      const last = times.length - 1, before = gridReqs(seen).length;
+      await setSlider(page, last);
+      await waitWindow(page, times[last]);
+      const g = gridReqs(seen).slice(before);
+      assert(g.length === 1 && g[0].q.t === String(times[last]), 'grid requests after the slide: ' + JSON.stringify(g));
+      const s = await sliderState(page);
+      assert(s.value === last && /· forecast$/.test(s.label), 'label: ' + s.label);
+      const data = (await page.evaluate(inPageLayer)).data;
+      const f = await fieldProblems(page, data, 0);
+      assert(!f.probs.length, f.probs.slice(0, 5).join(' | '));
+      assert((await fieldSum(page)) !== sum0, 'field image did not change');
+      assert((await pageState(page)).fields.length === 1, 'the slide added a field image');
+      await waitHash(page, { duct: '1', ductT: String(times[last]) });
+    });
+
+    await test('the oldest stored time is labelled analysis, days ago, and linked', async () => {
+      await setSlider(page, 0);
+      await waitWindow(page, times[0]);
+      const s = await sliderState(page);
+      assert(/· analysis, \d+ d ago$/.test(s.label), 'label: ' + s.label);
+      await waitHash(page, { duct: '1', ductT: String(times[0]) });
+    });
+
+    await test('back on the default time: ductT leaves the URL and the window comes from memory', async () => {
+      const before = gridReqs(seen).length;
+      await setSlider(page, defIdx);
+      await waitWindow(page, times[defIdx]);
+      await waitHash(page, { duct: '1', ductT: null });
+      assert(gridReqs(seen).length === before, 'refetched a window it held: ' + JSON.stringify(gridReqs(seen).slice(before)));
+      assert((await fieldSum(page)) === sum0, 'default-time field differs from the first drawing');
+    });
+
+    await test('panning: a burst of moves out of the window fetches once (debounced); a move inside fetches nothing', async () => {
+      const c0 = await page.evaluate(`(() => { const m = ${firstMap}; const c = m.getCenter(); return { lat: c.lat, lon: c.lng, z: m.getZoom() }; })()`);
+      let before = gridReqs(seen).length;
+      await page.evaluate((c) => {
+        const m = window.__mcHarness.maps.filter(x => x._container && x._container.isConnected && x._loaded)[0];
+        [3, 6, 9].forEach(d => m.setView([c.lat, c.lon + d], c.z, { animate: false }));
+      }, c0);
+      await sleep(900);
+      let g = gridReqs(seen).slice(before);
+      assert(g.length === 1, `${g.length} window requests for one burst of 3 moves: ` + JSON.stringify(g));
+      const [s, w, n, e] = g[0].q.bbox.split(',').map(Number);
+      assert(s <= c0.lat && n >= c0.lat && w <= c0.lon + 9 && e >= c0.lon + 9, `bbox ${g[0].q.bbox} does not hold the final view ${c0.lat},${c0.lon + 9}`);
+      before = gridReqs(seen).length;
+      await page.evaluate((c) => {
+        const m = window.__mcHarness.maps.filter(x => x._container && x._container.isConnected && x._loaded)[0];
+        m.setView([c.lat + 0.02, c.lon + 9.02], c.z, { animate: false });
+      }, c0);
+      await sleep(700);
+      assert(gridReqs(seen).length === before, 'a small move inside the window fetched: ' + JSON.stringify(gridReqs(seen).slice(before)));
+      await page.evaluate((c) => {
+        const m = window.__mcHarness.maps.filter(x => x._container && x._container.isConnected && x._loaded)[0];
+        m.setView([c.lat, c.lon], c.z, { animate: false });
+      }, c0);
+      await waitWindow(page, times[defIdx]);
+      await sleep(400);
+      assert(gridReqs(seen).length === before, 'moving back refetched a held window');
+      assert((await pageState(page)).cells === data0.cells.length, 'moving back did not redraw the first window');
+    });
+
+    // ── Long links ──
+    async function showLink(pg, l) {
+      await pg.evaluate((p) => {
+        const m = window.__mcHarness.maps.filter(x => x._container && x._container.isConnected && x._loaded)[0];
+        m.closePopup();
+        m.fitBounds([[p.a.lat, p.a.lon], [p.b.lat, p.b.lon]], { padding: [120, 120], animate: false });
+      }, { a: l.a, b: l.b });
+      await sleep(400);
+    }
+    async function checkDrawnLinks(pg, t) {
+      const want = expectedLinks(links.links, t);
+      const got = await pg.evaluate(inPageLinks);
+      for (const kind of ['duct', 'plain', 'nodata']) {
+        const w = want.filter(x => x.kind === kind).map(x => linkKey(x.link)).sort();
+        const g = (got[kind] || []).map(segKey).sort();
+        assert(JSON.stringify(w) === JSON.stringify(g), `${kind} links drawn ${g.length} want ${w.length} at ${t}`);
+        if (g.length) {
+          const st = got[kind + 'Style'];
+          assert(st.interactive === false && st.pane === 'mcDuctLinePane' && (kind === 'nodata') === !!st.dash, `${kind} style ${JSON.stringify(st)}`);
+        }
+      }
+      const casing = want.filter(x => x.kind !== 'nodata').map(x => linkKey(x.link)).sort();
+      assert(JSON.stringify((got.casing || []).map(segKey).sort()) === JSON.stringify(casing), 'casing lines do not match the solid links');
+      const legend = await pg.locator('.mc-duct-legend').first().textContent();
+      const n = want.length;
+      const line = n ? `On the map: ${n} link${n === 1 ? '' : 's'} heard within 90 min of the selected time.` : 'None heard within 90 min of the selected time.';
+      assert(legend.includes(line), `legend count: want "${line}" in ${legend.slice(0, 400)}`);
+      return want;
+    }
+
+    await test('at the time of the ducted reception its link is drawn as ducted; every drawn link matches /api/ducting/links', async () => {
+      await setSlider(page, times.indexOf(tEvil));
+      await waitWindow(page, tEvil);
+      await showLink(page, evil);
+      const want = await checkDrawnLinks(page, tEvil);
+      assert(want.some(x => x.link === evil && x.kind === 'duct'), 'the seeded ducted link is not expected as ducted');
+    });
+
+    await test('clicking the link opens its popup; the node-chosen name is text, never markup; the click still reaches the map', async () => {
+      const pre = await page.evaluate(() => typeof window.__dx);
+      assert(pre === 'undefined', 'the sender name already ran as markup somewhere on the map page (window.__dx is set)');
+      await page.evaluate(`(() => { const m = ${firstMap}; window.__ductClicks = 0; window.__ductOn = () => { window.__ductClicks++; }; m.on('click', window.__ductOn); })()`);
+      let text = null, pt = null;
+      for (const f of [0.5, 0.42, 0.58, 0.35, 0.65, 0.28, 0.72]) {
+        const p = await page.evaluate(DE.inPagePoint, { lat: evil.a.lat + (evil.b.lat - evil.a.lat) * f, lon: evil.a.lon + (evil.b.lon - evil.a.lon) * f });
+        if (p.blocked) continue;
+        await page.mouse.click(p.x, p.y);
+        try {
+          await page.waitForSelector('.leaflet-popup .mc-duct-link-popup', { timeout: 2000 });
+        } catch (_) { continue; }
+        const t = await page.locator('.leaflet-popup .mc-duct-link-popup').first().innerText();
+        if (t.includes('Sent by: ' + EVIL_NAME)) { text = t; pt = p; break; }
+        await page.evaluate(`${firstMap}.closePopup()`);
+      }
+      assert(text, 'could not open the popup of the seeded link');
+      const res = await page.evaluate(`(() => { const m = ${firstMap}; m.off('click', window.__ductOn); const box = document.querySelector('.leaflet-popup .mc-duct-link-popup');
+        return { clicks: window.__ductClicks, imgs: box.querySelectorAll('img').length, dx: typeof window.__dx, cellPopup: !!document.querySelector('.leaflet-popup .mc-duct-popup:not(.mc-duct-link-popup)') }; })()`);
+      assert(res.imgs === 0 && res.dx === 'undefined', 'the name was rendered as markup: ' + JSON.stringify(res));
+      assert(res.clicks >= 1, 'the page\'s map click listener did not get the click: ' + JSON.stringify(res));
+      assert(!res.cellPopup, 'a cell popup opened over the link popup');
+      assert(/^Long link, heard directly/.test(text) && text.includes('Heard by: ' + evil.b.name), 'popup: ' + text);
+      assert(text.includes(`${Math.round(evil.distKm)} km apart; radio horizon ${Math.round(evil.horizonKm)} km`), 'popup distances: ' + text);
+      assert(text.includes('Heard 2 times in the period') && /modelled duct along 100% of the path/.test(text), 'popup receptions: ' + text);
+      assert(text.includes(`can carry ${Math.round(links.freqMHz * 1000) / 1000} MHz`), 'popup frequency: ' + text);
+      assert(pt, 'no click point');
+    });
+
+    await test('moving the slider away closes the link popup and drops the link; the no-duct link is drawn plain at its time', async () => {
+      const far = times.findIndex(t => !links.links.some(l => l.receptions.some(r => Math.abs(r.t - t) <= LINK_WINDOW_S)));
+      assert(far >= 0, 'every stored time has a link near it');
+      assert(await page.locator('.leaflet-popup .mc-duct-link-popup').count(), 'no link popup open before the move');
+      await setSlider(page, far);
+      await waitWindow(page, times[far]);
+      // Leaflet fades a closed popup out and removes it 200 ms later.
+      await page.waitForSelector('.leaflet-popup .mc-duct-link-popup', { state: 'detached', timeout: 2000 })
+        .catch(() => { throw new Error('link popup still open at a time without the link'); });
+      await checkDrawnLinks(page, times[far]);
+      await setSlider(page, times.indexOf(tPlain));
+      await waitWindow(page, tPlain);
+      const want = await checkDrawnLinks(page, tPlain);
+      assert(want.some(x => x.link === plain && x.kind === 'plain'), 'the seeded no-duct link is not expected as plain');
+    });
+
+    await test('legend: the period summary of the long links', async () => {
+      const s = links.summary, days = links.days;
+      const txt = await page.locator('.mc-duct-links-summary').first().textContent();
+      const pl = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+      assert(txt.startsWith(`Last ${days} days: ${pl(s.receptions, 'direct reception')} beyond the radio horizon on ${pl(s.links, 'node pair')}.`), 'summary: ' + txt);
+      if (s.withGrid) assert(txt.includes(`${Math.round(Math.min(s.duringDuct, s.withGrid) / s.withGrid * 100)}% were during a modelled duct along the path`), 'summary share: ' + txt);
+      assert(txt.endsWith(`the same paths were ducted ${Math.round(s.baselineDuctFrac * 100)}% of the time overall.`), 'summary baseline: ' + txt);
+      assert(txt === await page.evaluate((a) => window.MC_ductLinksSummary(a.s, a.d), { s, d: days }), 'legend differs from MC_ductLinksSummary');
+    });
+
+    await test('disabling the overlay removes everything it drew and its URL parameters', async () => {
+      await setOverlayUi(page, false);
+      await page.waitForFunction(() => !document.querySelector('.mc-duct-legend') && !document.querySelector('.mc-duct-time'), null, { timeout: 5000 });
+      const st = await pageState(page);
+      assert(!st.cells && !st.lora.length && !st.fields.length && st.legends === 0 && st.times === 0, 'left over: ' + JSON.stringify({ cells: st.cells, lora: st.lora.length, fields: st.fields.length }));
+      assert(!Object.keys(await page.evaluate(inPageLinks)).length, 'link lines left on the map');
+      await waitHash(page, { duct: null, ductT: null });
+    });
+
+    await test('map page has no page errors', async () => { assert(!page.__errors.length, page.__errors.slice(0, 3).join(' | ')); });
+
+    // ── Deep link ──
+    await test('deep link #/map?duct=1&ductT=<stored time> turns the overlay on at that time', async () => {
+      const k = Math.max(0, defIdx - 2);
+      const dp = await track({ theme: 'light' });
+      const ds = trackDucting(dp.page);
+      await gotoRoute(dp.page, `#/map?duct=1&ductT=${times[k]}`);
+      await waitWindow(dp.page, times[k]);
+      const s = await sliderState(dp.page);
+      assert(s.value === k, `slider at ${s.value} want ${k}`);
+      assert(gridReqs(ds).length >= 1 && gridReqs(ds).every(r => r.q.t === String(times[k])), 'windows fetched: ' + JSON.stringify(gridReqs(ds)));
+      assert(await dp.page.locator('label[data-tile-overlay-id="ducting"] input').first().isChecked(), 'overlay not ticked');
+      const h = await hashParams(dp.page);
+      assert(h.duct === '1' && h.ductT === String(times[k]), 'hash: ' + JSON.stringify(h));
+      assert(!dp.page.__errors.length, dp.page.__errors.slice(0, 3).join(' | '));
+    });
+
+    await test('a deep link to a time that is not stored shows the default time', async () => {
+      const dp = await track({ theme: 'light' });
+      await gotoRoute(dp.page, `#/map?duct=1&ductT=${times[defIdx] + 60}`);
+      await waitWindow(dp.page, times[defIdx]);
+      const s = await sliderState(dp.page);
+      assert(s.value === defIdx, `slider at ${s.value} want ${defIdx}`);
+      assert(!dp.page.__errors.length, dp.page.__errors.slice(0, 3).join(' | '));
+    });
+
+    // ── Planner: map clicks still place sites with the overlay on ──
+    if (cfg.planner) {
+      await test('planner page: with the overlay on, a click on the field places a site (and opens no ducting popup)', async () => {
+        const pp = await track({ theme: 'light', overlays: ['ducting'] });
+        await gotoRoute(pp.page, '#/tools/planner?mode=coverage');
+        await pp.page.waitForSelector('.mc-duct-legend', { state: 'visible', timeout: 25000 });
+        await pp.page.waitForFunction(() => {
+          const m = window.__mcHarness.maps.filter(x => x._container && x._container.isConnected && x._loaded)[0];
+          let ok = false;
+          if (m) m.eachLayer((l) => { if (l._mcDuct && l._field && l._data) ok = true; });
+          return ok;
+        }, null, { timeout: 20000 });
+        await pp.page.mouse.move(5, 5);
+        assert(!(await pp.page.locator('path.mc-pl-cov-site').count()), 'a site before any click');
+        const data = (await pp.page.evaluate(inPageLayer)).data;
+        const cell = data.cells.find(c => c.c[0] >= 3) || data.cells.find(c => c.c[0] >= 1);
+        const pts = await pointsIn(pp.page, cell, data.stepDeg, 4);
+        assert(pts.length, 'no free point in the cell');
+        await pp.page.mouse.click(pts[0].x, pts[0].y);
+        await pp.page.waitForSelector('path.mc-pl-cov-site', { timeout: 5000 }).catch(() => {});
+        await sleep(300);
+        const res = await pp.page.evaluate(() => ({ site: document.querySelectorAll('path.mc-pl-cov-site').length, duct: !!document.querySelector('.leaflet-popup .mc-duct-popup') }));
+        assert(res.site === 1 && !res.duct, `click at ${cell.lat},${cell.lon}: ` + JSON.stringify(res));
+        assert(!(await pageState(pp.page)).interactive.length, 'interactive overlay layers');
+        assert(!pp.page.__errors.length, pp.page.__errors.slice(0, 3).join(' | '));
+      });
+    } else {
+      R.skip('planner page: a click on the field places a site', 'planner disabled on this server');
+    }
+
+    // ── Endpoint states ──
+    for (const [name, status, body, want] of [
+      ['pending meta', 200, { status: 'pending', source: 'gfs-grid', times: [] }, /being prepared/],
+      ['HTTP 500 meta', 500, { error: 'x' }, /unavailable/],
+    ]) {
+      await test(`legend explains a ${name} answer, nothing drawn`, async () => {
+        const sp = await track({ theme: 'light', overlays: ['ducting'] });
+        await sp.page.route('**/api/ducting/meta', (route) => route.fulfill({ status, json: body }));
+        await gotoRoute(sp.page, '#/map');
+        await sp.page.waitForSelector('.mc-duct-legend', { state: 'visible', timeout: 25000 });
+        await sp.page.waitForFunction((src) => new RegExp(src).test((document.querySelector('.mc-duct-legend') || {}).textContent || ''), want.source, { timeout: 10000 });
+        const st = await pageState(sp.page);
+        assert(!st.cells && !st.fields.length, 'field drawn');
+        const errs = sp.page.__errors.filter(e => !/Failed to load resource/.test(e));
+        assert(!errs.length, errs.slice(0, 3).join(' | '));
+      });
+    }
+    await test('a failing /api/ducting/links leaves the field and says the links are unavailable', async () => {
+      const sp = await track({ theme: 'light', overlays: ['ducting'] });
+      await sp.page.route('**/api/ducting/links*', (route) => route.fulfill({ status: 500, json: { error: 'x' } }));
+      await gotoRoute(sp.page, '#/map');
+      await waitWindow(sp.page, times[defIdx]);
+      await sp.page.waitForFunction(() => /Long links are not available right now/.test((document.querySelector('.mc-duct-legend') || {}).textContent || ''), null, { timeout: 10000 });
+      assert((await pageState(sp.page)).fields.length === 1, 'no field');
+      assert(!Object.keys(await sp.page.evaluate(inPageLinks)).length, 'links drawn without an answer');
+      const errs = sp.page.__errors.filter(e => !/Failed to load resource/.test(e));
+      assert(!errs.length, errs.slice(0, 3).join(' | '));
+    });
+  } finally {
+    for (const p of pages) await p.context.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
+  console.log(`\n${R.summary()}`);
+  process.exit(R.failed ? 1 : 0);
+}
+
+run().catch((e) => { console.error(e); process.exit(1); });
