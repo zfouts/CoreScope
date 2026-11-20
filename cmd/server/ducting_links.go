@@ -39,6 +39,7 @@ package main
 // in a bounded FIFO.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,12 +84,13 @@ type ductingLinksInput struct {
 	FreqMHz float64
 	Days    int
 	Memo    *ductingLinksMemo // nil: no memo
-}
 
-// ductingHorizonKm is the smooth-earth radio horizon between two antennas at
-// k = 4/3, heights in metres.
-func ductingHorizonKm(hA, hB float64) float64 {
-	return 4.12 * (math.Sqrt(math.Max(0, hA)) + math.Sqrt(math.Max(0, hB)))
+	// Terrain is the line-of-sight terrain; nil: smooth-earth rule (antenna
+	// heights only, k = 4/3). KFactor is the resolved los.kFactor. LOS keeps
+	// verdicts across rebuilds (nil: none kept).
+	Terrain ductingTerrain
+	KFactor float64
+	LOS     *ductingLOSCache
 }
 
 // ductingLinksFreq is the duct-test frequency: los.frequencyMhz (resolved,
@@ -101,43 +103,29 @@ func ductingLinksFreq(cfg *Config) float64 {
 	return ductingLinksDefaultFreqMHz
 }
 
-// --- memo ---
+// --- bounded caches ---
 
-// ductingLinksMemoKey identifies one reception's path result. Beyond the
-// observation and the step's run, it holds everything else the result
-// depends on, so a moved node, a re-run step or another frequency is a miss
-// rather than a stale hit.
-type ductingLinksMemoKey struct {
-	obsID              int
-	via                string
-	a, b               string
-	validTime, runTime int64
-	latA, lonA         float64
-	latB, lonB         float64
-	freq               float64
-}
-
-type ductingLinksMemoVal struct{ duct, super float64 }
-
-// ductingLinksMemo is a bounded map with first-in-first-out eviction.
-type ductingLinksMemo struct {
+// ductingFIFO is a bounded map with first-in-first-out eviction, safe for
+// concurrent use. A nil *ductingFIFO stores nothing.
+type ductingFIFO[K comparable, V any] struct {
 	mu   sync.Mutex
-	m    map[ductingLinksMemoKey]ductingLinksMemoVal
-	ring []ductingLinksMemoKey // insertion order; slot next is the oldest once full
+	m    map[K]V
+	ring []K // insertion order; slot next is the oldest once full
 	next int
 	max  int
 }
 
-func newDuctingLinksMemo(max int) *ductingLinksMemo {
+func newDuctingFIFO[K comparable, V any](max int) *ductingFIFO[K, V] {
 	if max < 1 {
 		max = 1
 	}
-	return &ductingLinksMemo{m: make(map[ductingLinksMemoKey]ductingLinksMemoVal, max), max: max}
+	return &ductingFIFO[K, V]{m: make(map[K]V, min(max, 1024)), max: max}
 }
 
-func (m *ductingLinksMemo) get(k ductingLinksMemoKey) (ductingLinksMemoVal, bool) {
+func (m *ductingFIFO[K, V]) get(k K) (V, bool) {
 	if m == nil {
-		return ductingLinksMemoVal{}, false
+		var zero V
+		return zero, false
 	}
 	m.mu.Lock()
 	v, ok := m.m[k]
@@ -145,7 +133,7 @@ func (m *ductingLinksMemo) get(k ductingLinksMemoKey) (ductingLinksMemoVal, bool
 	return v, ok
 }
 
-func (m *ductingLinksMemo) put(k ductingLinksMemoKey, v ductingLinksMemoVal) {
+func (m *ductingFIFO[K, V]) put(k K, v V) {
 	if m == nil {
 		return
 	}
@@ -165,10 +153,201 @@ func (m *ductingLinksMemo) put(k ductingLinksMemoKey, v ductingLinksMemoVal) {
 	m.m[k] = v
 }
 
-func (m *ductingLinksMemo) len() int {
+func (m *ductingFIFO[K, V]) len() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.m)
+}
+
+// ductingLinksMemoKey identifies one reception's path result. Beyond the
+// observation and the step's run, it holds everything else the result (and
+// the pair's line-of-sight verdict) depends on, so a moved node, a new
+// height, a re-run step or another frequency or k is a miss rather than a
+// stale hit.
+type ductingLinksMemoKey struct {
+	obsID              int
+	via                string
+	a, b               string
+	validTime, runTime int64
+	latA, lonA         float64
+	latB, lonB         float64
+	hA, hB             float64
+	k                  float64
+	freq               float64
+}
+
+// ductingLinksMemo remembers per-reception path results across rebuilds.
+type ductingLinksMemo = ductingFIFO[ductingLinksMemoKey, ductingPathMetric]
+
+func newDuctingLinksMemo(max int) *ductingLinksMemo {
+	return newDuctingFIFO[ductingLinksMemoKey, ductingPathMetric](max)
+}
+
+// --- line of sight ---
+
+// Line-of-sight methods (DuctingLinksSummary.LosMethod).
+const (
+	ductingLOSTerrain     = "terrain"
+	ductingLOSSmoothEarth = "smooth-earth"
+)
+
+const (
+	ductingLinksLOSMaxCache = 20000            // verdicts kept across rebuilds
+	ductingLinksLOSChecks   = 400              // new terrain checks per rebuild, longest pairs first
+	ductingLinksLOSWait     = srtmFetchTimeout // a rebuild's whole terrain budget
+)
+
+// ductingTerrain is the terrain source the line-of-sight check reads
+// (*srtmSource, shared with route LoS and the planner).
+type ductingTerrain interface {
+	View(ctx context.Context, bb geoBBox) (terrainView, error)
+}
+
+// ductingLOS is a pair's line-of-sight verdict.
+type ductingLOS uint8
+
+const (
+	ductingLOSUnknown ductingLOS = iota // no terrain data where it was needed
+	ductingLOSBeyond                    // no geometric line of sight: a candidate
+	ductingLOSWithin                    // line of sight: not a candidate
+)
+
+// ductingLOSKey is everything a verdict depends on, with the ends in pubkey
+// order so A->B and B->A share it.
+type ductingLOSKey struct {
+	a, b       string
+	latA, lonA float64
+	latB, lonB float64
+	hA, hB     float64
+	k, freq    float64
+}
+
+type ductingLOSCache = ductingFIFO[ductingLOSKey, ductingLOS]
+
+func newDuctingLOSCache(max int) *ductingLOSCache {
+	return newDuctingFIFO[ductingLOSKey, ductingLOS](max)
+}
+
+// ductingHorizonKm is the smooth-earth radio horizon between two antennas at
+// k = 4/3, heights in metres (DuctingLink.HorizonKm).
+func ductingHorizonKm(hA, hB float64) float64 {
+	return 4.12 * (math.Sqrt(math.Max(0, hA)) + math.Sqrt(math.Max(0, hB)))
+}
+
+// ductingHorizonKmK is the smooth-earth radio horizon at effective earth
+// radius factor k: sqrt(2kR h1) + sqrt(2kR h2), heights in metres.
+func ductingHorizonKmK(hA, hB, k float64) float64 {
+	r := 2 * k * earthRadiusKm / 1000
+	return math.Sqrt(r*math.Max(0, hA)) + math.Sqrt(r*math.Max(0, hB))
+}
+
+// ductingLOSVerdict decides one pair over terrain. cache is false for a
+// transient failure (budget, timeout, tiles not loadable now), which leaves
+// the pair unverified until a later rebuild.
+//
+// Up to losMaxLegKm: the leg's SRTM profile (sampleLegProfile, as route LoS
+// and the planner read it) through analyzeLOS at k; beyond line of sight iff
+// its verdict is "blocked", i.e. terrain plus the k-earth bulge rises above
+// the straight ray somewhere (clearance < 0, losVerdict). "marginal" (inside
+// the first Fresnel zone but not cut) is line of sight. Longer legs, legs
+// over more tiles than one view may load, and profiles that cross a tile
+// without data use the endpoint rule: the smooth-earth horizon at k from
+// antenna height plus ground elevation above sea level at each end, which
+// overstates the horizon and so errs towards "within".
+func ductingLOSVerdict(ctx context.Context, t ductingTerrain, a, b DuctingLinkEnd, distKm, k, freq float64) (ductingLOS, bool) {
+	pa, pb := geoPoint{Lat: a.Lat, Lon: a.Lon}, geoPoint{Lat: b.Lat, Lon: b.Lon}
+	if distKm <= losMaxLegKm {
+		ends := plannerBBoxAdd(geoBBox{S: pa.Lat, W: pa.Lon, N: pa.Lat, E: pa.Lon}, pb)
+		v, err := t.View(ctx, plannerProfileView(ends, plannerProfilePad(losMaxLegKm)))
+		switch {
+		case err == nil:
+			if elev, ok := sampleLegProfile(v, pa, pb); ok {
+				r, ok := analyzeLOS(elev, distKm, losParams{FreqMHz: freq, KFactor: k, AntennaAM: a.HeightM, AntennaBM: b.HeightM})
+				if !ok {
+					return ductingLOSUnknown, true
+				}
+				if r.Verdict == "blocked" {
+					return ductingLOSBeyond, true
+				}
+				return ductingLOSWithin, true
+			}
+		case errors.Is(err, errTerrainTooManyTiles):
+		default:
+			return ductingLOSUnknown, false
+		}
+	}
+	var ground [2]float64
+	for i, p := range [2]geoPoint{pa, pb} {
+		v, err := t.View(ctx, geoBBox{S: p.Lat, W: p.Lon, N: p.Lat, E: p.Lon})
+		if err != nil {
+			return ductingLOSUnknown, false
+		}
+		e, ok := v.ElevationAt(p.Lat, p.Lon)
+		if !ok {
+			return ductingLOSUnknown, true
+		}
+		ground[i] = math.Max(0, e)
+	}
+	if distKm > ductingHorizonKmK(a.HeightM+ground[0], b.HeightM+ground[1], k) {
+		return ductingLOSBeyond, true
+	}
+	return ductingLOSWithin, true
+}
+
+// ductingLinksK is the effective earth radius factor of the line-of-sight
+// test: the resolved los.kFactor with terrain, 4/3 without.
+func (in *ductingLinksInput) losK() float64 {
+	if in.Terrain != nil && in.KFactor > 0 {
+		return in.KFactor
+	}
+	return defaultLOSKFactor
+}
+
+func (in *ductingLinksInput) losMethod() string {
+	if in.Terrain != nil {
+		return ductingLOSTerrain
+	}
+	return ductingLOSSmoothEarth
+}
+
+// losCandidates keeps the pairs beyond line of sight. pairs are already past
+// the antenna-height smooth-earth horizon at k and sorted longest first, so
+// the per-rebuild check budget goes to the longest. Without terrain every
+// such pair is a candidate (the smooth-earth rule). Runs outside any store
+// lock.
+func (in *ductingLinksInput) losCandidates(pairs []*ductingLinkPair) (out []*ductingLinkPair, unverified int) {
+	if in.Terrain == nil {
+		return pairs, 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), ductingLinksLOSWait)
+	defer cancel()
+	k, checks := in.losK(), 0
+	out = make([]*ductingLinkPair, 0, len(pairs))
+	for _, p := range pairs {
+		ea, eb := in.Ends[p.a], in.Ends[p.b]
+		key := ductingLOSKey{a: p.a, b: p.b, latA: ea.Lat, lonA: ea.Lon, latB: eb.Lat, lonB: eb.Lon, hA: ea.HeightM, hB: eb.HeightM, k: k, freq: in.FreqMHz}
+		if key.a > key.b {
+			key.a, key.b = key.b, key.a
+			key.latA, key.lonA, key.latB, key.lonB = key.latB, key.lonB, key.latA, key.lonA
+			key.hA, key.hB = key.hB, key.hA
+		}
+		v, ok := in.LOS.get(key)
+		if !ok && checks < ductingLinksLOSChecks && ctx.Err() == nil {
+			checks++
+			var cache bool
+			if v, cache = ductingLOSVerdict(ctx, in.Terrain, ea, eb, p.distKm, k, in.FreqMHz); cache {
+				in.LOS.put(key, v)
+			}
+			ok = true
+		}
+		switch {
+		case !ok || v == ductingLOSUnknown:
+			unverified++
+		case v == ductingLOSBeyond:
+			out = append(out, p)
+		}
+	}
+	return out, unverified
 }
 
 // --- analysis ---
@@ -180,14 +359,72 @@ type ductingLinkPair struct {
 	recv    []int // indices into in.Recv
 }
 
-// ductingPathFracs turns path stats into the duct and super-refractive
-// shares; -1 for both when no sample had data.
-func ductingPathFracs(ps ducting.PathStats) (duct, super float64) {
+// ductingPathMetric is one path at one step. duct and enh are -1 when no
+// sample had data; hasN is false when no sample had a mean dN/dh.
+type ductingPathMetric struct {
+	duct, enh float64
+	meanN     float64
+	hasN      bool
+}
+
+var ductingNoMetric = ductingPathMetric{duct: -1, enh: -1}
+
+func ductingPathMetricOf(ps ducting.PathStats) ductingPathMetric {
+	m := ductingNoMetric
+	m.duct, m.enh = ductingPathFracs(ps)
+	if m.duct >= 0 && ps.NCount > 0 {
+		m.meanN, m.hasN = ps.MeanN, true
+	}
+	return m
+}
+
+// ductingPathFracs turns path stats into the duct and enhanced (super or
+// duct) shares; -1 for both when no sample had data.
+func ductingPathFracs(ps ducting.PathStats) (duct, enhanced float64) {
 	n := ps.Samples - ps.NoData
 	if n <= 0 {
 		return -1, -1
 	}
-	return float64(ps.Duct) / float64(n), float64(ps.Super) / float64(n)
+	return float64(ps.Duct) / float64(n), float64(ps.Enhanced) / float64(n)
+}
+
+// ductingTally accumulates shares and a mean over path metrics with data.
+type ductingTally struct {
+	n, duct, enh int
+	nN           int
+	sumN         float64
+}
+
+func (t *ductingTally) add(m ductingPathMetric) {
+	if m.duct < 0 {
+		return
+	}
+	t.n++
+	if m.duct >= ductingLinksDuctFrac {
+		t.duct++
+	}
+	if m.enh >= ductingLinksDuctFrac {
+		t.enh++
+	}
+	if m.hasN {
+		t.nN++
+		t.sumN += m.meanN
+	}
+}
+
+func (t *ductingTally) frac(k int) float64 {
+	if t.n == 0 {
+		return -1
+	}
+	return float64(k) / float64(t.n)
+}
+
+func (t *ductingTally) meanN() *float64 {
+	if t.nN == 0 {
+		return nil
+	}
+	v := t.sumN / float64(t.nN)
+	return &v
 }
 
 // ductingNearestRow returns the index of the row whose ValidTime is nearest t
@@ -211,15 +448,21 @@ func ductingNearestRow(rows []ductingGridRow, t int64) int {
 	return best
 }
 
+// ductingLinksEmptySummary is the summary of an answer without data.
+func ductingLinksEmptySummary(losMethod string) DuctingLinksSummary {
+	return DuctingLinksSummary{BaselineDuctFrac: -1, RecvEnhancedFrac: -1, BaselineEnhancedFrac: -1, LosMethod: losMethod}
+}
+
 // buildDuctingLinks is the analysis over copied inputs. It never touches the
-// store; the grid is read through src.Load only, one step at a time.
+// store; the grid is read through src.Load (or LoadPlanes) only, one step at
+// a time, and terrain through in.Terrain.
 func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Time) (*DuctingLinksResponse, error) {
 	resp := &DuctingLinksResponse{
 		Status:      "ok",
 		FreqMHz:     in.FreqMHz,
 		Days:        in.Days,
 		GeneratedAt: now.Unix(),
-		Summary:     DuctingLinksSummary{BaselineDuctFrac: -1},
+		Summary:     ductingLinksEmptySummary(in.losMethod()),
 		Links:       []DuctingLink{},
 	}
 	rows, err := src.Rows()
@@ -235,27 +478,28 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 		sort.Slice(rows, func(i, j int) bool { return rows[i].ValidTime < rows[j].ValidTime })
 	}
 
-	// Pairs: one per (advertiser, observer node), only beyond the horizon and
-	// within ductingLinksMaxKm.
+	// Pairs: one per (transmitter, receiver) within ductingLinksMaxKm and
+	// past the antenna-height smooth-earth horizon at k (a pair inside it is
+	// never beyond line of sight, so it needs no terrain).
+	k := in.losK()
 	type pairKey struct{ a, b string }
 	byPair := make(map[pairKey]*ductingLinkPair)
 	var pairs []*ductingLinkPair
 	for i := range in.Recv {
 		r := &in.Recv[i]
-		k := pairKey{r.a, r.b}
-		p, seen := byPair[k]
+		pk := pairKey{r.a, r.b}
+		p, seen := byPair[pk]
 		if !seen {
 			ea, okA := in.Ends[r.a]
 			eb, okB := in.Ends[r.b]
 			if okA && okB && r.a != r.b {
 				d := haversineKm(ea.Lat, ea.Lon, eb.Lat, eb.Lon)
-				h := ductingHorizonKm(ea.HeightM, eb.HeightM)
-				if d > h && d <= ductingLinksMaxKm {
-					p = &ductingLinkPair{a: r.a, b: r.b, distKm: d, horizon: h}
+				if d > ductingHorizonKmK(ea.HeightM, eb.HeightM, k) && d <= ductingLinksMaxKm {
+					p = &ductingLinkPair{a: r.a, b: r.b, distKm: d, horizon: ductingHorizonKm(ea.HeightM, eb.HeightM)}
 					pairs = append(pairs, p)
 				}
 			}
-			byPair[k] = p // nil remembers a rejected pair
+			byPair[pk] = p // nil remembers a rejected pair
 		}
 		if p != nil {
 			p.recv = append(p.recv, i)
@@ -270,6 +514,7 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 		}
 		return pairs[i].b < pairs[j].b
 	})
+	pairs, resp.Summary.UnverifiedPairs = in.losCandidates(pairs)
 	resp.Summary.Links = len(pairs)
 	listed := pairs
 	if len(listed) > ductingLinksMaxPairs {
@@ -278,21 +523,20 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 
 	// Per-reception step, from the memo where possible; the rest are grouped
 	// by the row they need.
-	ductF := make([]float64, len(in.Recv))
-	superF := make([]float64, len(in.Recv))
+	metric := make([]ductingPathMetric, len(in.Recv))
 	pairOf := make([]*ductingLinkPair, len(in.Recv))
 	need := make(map[int][]int) // row index -> receptions still to compute
 	for _, p := range pairs {
 		for _, i := range p.recv {
 			resp.Summary.Receptions++
-			ductF[i], superF[i] = -1, -1
+			metric[i] = ductingNoMetric
 			pairOf[i] = p
 			row := ductingNearestRow(rows, in.Recv[i].t)
 			if row < 0 {
 				continue
 			}
-			if v, ok := in.Memo.get(ductingLinksMemoKeyFor(in, p, &in.Recv[i], rows[row])); ok {
-				ductF[i], superF[i] = v.duct, v.super
+			if v, ok := in.Memo.get(in.memoKey(p, &in.Recv[i], rows[row], k)); ok {
+				metric[i] = v
 				continue
 			}
 			need[row] = append(need[row], i)
@@ -317,11 +561,11 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 	sort.Ints(steps)
 
 	// Steps are visited one at a time and only sampled along paths, so a
-	// source that can decode just the C and F planes into one reused buffer
-	// does (3.4 MB and seven planes less garbage per step).
-	var dec ducting.Decoder
+	// source that can decode just the C, F and N planes into one reused
+	// buffer does (2.4 MB and four planes less garbage per step).
+	dec := ducting.Decoder{N: true}
 	planes, _ := src.(ductingPlaneLoader)
-	combos, ducted := 0, 0
+	var base ductingTally
 	for _, row := range steps {
 		var g *ducting.Grid
 		var err error
@@ -340,41 +584,34 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 			continue
 		}
 		for _, i := range need[row] {
-			p, r := pairOf[i], &in.Recv[i]
+			p := pairOf[i]
 			ea, eb := in.Ends[p.a], in.Ends[p.b]
-			ductF[i], superF[i] = ductingPathFracs(g.PathStats(ea.Lat, ea.Lon, eb.Lat, eb.Lon, in.FreqMHz, ductingLinksPathKm))
-			in.Memo.put(ductingLinksMemoKeyFor(in, p, r, rows[row]), ductingLinksMemoVal{ductF[i], superF[i]})
+			metric[i] = ductingPathMetricOf(g.PathStats(ea.Lat, ea.Lon, eb.Lat, eb.Lon, in.FreqMHz, ductingLinksPathKm))
+			in.Memo.put(in.memoKey(p, &in.Recv[i], rows[row], k), metric[i])
 		}
 		if len(listed) > 0 && isBase(row) {
 			for _, p := range listed {
 				ea, eb := in.Ends[p.a], in.Ends[p.b]
-				d, _ := ductingPathFracs(g.PathStats(ea.Lat, ea.Lon, eb.Lat, eb.Lon, in.FreqMHz, ductingLinksPathKm))
-				if d < 0 {
-					continue // no data along the path at this step: not a combination
-				}
-				combos++
-				if d >= ductingLinksDuctFrac {
-					ducted++
-				}
+				// No data along the path at this step: not a combination.
+				base.add(ductingPathMetricOf(g.PathStats(ea.Lat, ea.Lon, eb.Lat, eb.Lon, in.FreqMHz, ductingLinksPathKm)))
 			}
 		}
 		// g goes out of scope here (or is reused by dec): at most one step is held.
 	}
-	if combos > 0 {
-		resp.Summary.BaselineDuctFrac = float64(ducted) / float64(combos)
-	}
+	resp.Summary.BaselineDuctFrac = base.frac(base.duct)
+	resp.Summary.BaselineEnhancedFrac = base.frac(base.enh)
+	resp.Summary.BaselineMeanGradNkm = base.meanN()
 
+	var recv ductingTally
 	for _, p := range pairs {
 		for _, i := range p.recv {
-			if ductF[i] < 0 {
-				continue
-			}
-			resp.Summary.WithGrid++
-			if ductF[i] >= ductingLinksDuctFrac {
-				resp.Summary.DuringDuct++
-			}
+			recv.add(metric[i])
 		}
 	}
+	resp.Summary.WithGrid = recv.n
+	resp.Summary.DuringDuct = recv.duct
+	resp.Summary.RecvEnhancedFrac = recv.frac(recv.enh)
+	resp.Summary.RecvMeanGradNkm = recv.meanN()
 
 	resp.Links = make([]DuctingLink, 0, len(listed))
 	for _, p := range listed {
@@ -393,9 +630,13 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 			idx = idx[:ductingLinksMaxRecv]
 		}
 		recs := make([]DuctingReception, len(idx))
-		for k, i := range idx {
-			r := &in.Recv[i]
-			recs[k] = DuctingReception{T: r.t, Via: r.via, SNR: r.snr, RSSI: r.rssi, DuctFrac: ductF[i], SuperFrac: superF[i]}
+		for j, i := range idx {
+			r, m := &in.Recv[i], metric[i]
+			recs[j] = DuctingReception{T: r.t, Via: r.via, SNR: r.snr, RSSI: r.rssi, DuctFrac: m.duct, SuperFrac: m.enh}
+			if m.hasN {
+				v := m.meanN
+				recs[j].MeanGradNkm = &v
+			}
 		}
 		resp.Links = append(resp.Links, DuctingLink{
 			A: in.Ends[p.a], B: in.Ends[p.b],
@@ -406,11 +647,11 @@ func buildDuctingLinks(in ductingLinksInput, src ductingStepSource, now time.Tim
 	return resp, nil
 }
 
-func ductingLinksMemoKeyFor(in ductingLinksInput, p *ductingLinkPair, r *ductingLinkObs, row ductingGridRow) ductingLinksMemoKey {
+func (in *ductingLinksInput) memoKey(p *ductingLinkPair, r *ductingLinkObs, row ductingGridRow, k float64) ductingLinksMemoKey {
 	ea, eb := in.Ends[p.a], in.Ends[p.b]
 	return ductingLinksMemoKey{
 		obsID: r.obsID, via: r.via, a: p.a, b: p.b, validTime: row.ValidTime, runTime: row.RunTime,
-		latA: ea.Lat, lonA: ea.Lon, latB: eb.Lat, lonB: eb.Lon, freq: in.FreqMHz,
+		latA: ea.Lat, lonA: ea.Lon, latB: eb.Lat, lonB: eb.Lon, hA: ea.HeightM, hB: eb.HeightM, k: k, freq: in.FreqMHz,
 	}
 }
 
@@ -728,7 +969,26 @@ func (s *Server) ductingLinksInputFor(days int, now time.Time) (ductingLinksInpu
 	from, to := now.Unix()-int64(days)*86400, now.Unix()
 	in.Recv = s.store.ductingLinkReceptions(ends, s.cfg, from, to)
 	in.Recv = append(in.Recv, s.store.ductingRelayLinkReceptions(ends, pm, s.cfg, from, to)...)
+	in.Terrain, in.KFactor = s.ductingLinksTerrain()
 	return in, nil
+}
+
+// ductingLinksTerrain is the terrain source of the line-of-sight test (the
+// one route LoS and the planner share) and the resolved los.kFactor, or nil
+// when LoS terrain is not enabled.
+func (s *Server) ductingLinksTerrain() (ductingTerrain, float64) {
+	if s.cfg == nil || !s.cfg.LOS.enabled() || s.elevation == nil || s.elevation.src == nil {
+		return nil, 0
+	}
+	r, _ := s.cfg.LOS.resolved()
+	return s.elevation.src, r.KFactor
+}
+
+func (s *Server) ductingLinksLOSMethod() string {
+	if t, _ := s.ductingLinksTerrain(); t != nil {
+		return ductingLOSTerrain
+	}
+	return ductingLOSSmoothEarth
 }
 
 // --- HTTP, cache, singleflight ---
@@ -737,7 +997,8 @@ func (s *Server) ductingLinksInputFor(days int, now time.Time) (ductingLinksInpu
 // generation is (maxObsID, totalObs): a new observation raises maxObsID and
 // eviction lowers totalObs. The grid generation is the newest run_time plus
 // the row count and the last valid time (a new step or a pruned one). The
-// visibility generation is nodeVisibilityGen. Node positions, repeater
+// visibility generation is nodeVisibilityGen; losMethod is whether terrain
+// is available. Node positions, repeater
 // heights and rewritten signature flags are not in the key; the TTL bounds
 // how long they can be stale.
 type ductingLinksKey struct {
@@ -748,10 +1009,11 @@ type ductingLinksKey struct {
 	rowCount  int
 	lastValid int64
 	vis       string
+	losMethod string
 }
 
 func (k ductingLinksKey) String() string {
-	return fmt.Sprintf("%d|%d|%d|%d|%d|%d|%s", k.days, k.maxObsID, k.totalObs, k.runTime, k.rowCount, k.lastValid, k.vis)
+	return fmt.Sprintf("%d|%d|%d|%d|%d|%d|%s|%s", k.days, k.maxObsID, k.totalObs, k.runTime, k.rowCount, k.lastValid, k.vis, k.losMethod)
 }
 
 type ductingLinksCached struct {
@@ -763,7 +1025,7 @@ type ductingLinksCached struct {
 // ductingLinksState caches /api/ducting/links answers (one per days value,
 // so at most ductingHistoryDaysMax entries), collapses concurrent rebuilds
 // of the same key, runs at most one rebuild at a time, and keeps the
-// per-reception memo.
+// per-reception memo and the line-of-sight verdicts.
 type ductingLinksState struct {
 	sf      singleflight.Group
 	buildMu sync.Mutex // one rebuild at a time, whatever the key
@@ -772,6 +1034,7 @@ type ductingLinksState struct {
 	cache map[int]*ductingLinksCached
 
 	memo *ductingLinksMemo
+	los  *ductingLOSCache
 	now  func() time.Time // tests replace it
 
 	// gather collects the input; tests replace it. nil: Server.ductingLinksInputFor.
@@ -782,6 +1045,7 @@ func newDuctingLinksState() *ductingLinksState {
 	return &ductingLinksState{
 		cache: make(map[int]*ductingLinksCached),
 		memo:  newDuctingLinksMemo(ductingLinksMaxMemo),
+		los:   newDuctingLOSCache(ductingLinksLOSMaxCache),
 		now:   time.Now,
 	}
 }
@@ -796,7 +1060,7 @@ func (st *ductingLinksState) cached(k ductingLinksKey, now time.Time) []byte {
 }
 
 func (st *ductingLinksState) key(s *Server, src ductingStepSource, days int) (ductingLinksKey, error) {
-	k := ductingLinksKey{days: days, vis: s.nodeVisibilityGen()}
+	k := ductingLinksKey{days: days, vis: s.nodeVisibilityGen(), losMethod: s.ductingLinksLOSMethod()}
 	rows, err := src.Rows()
 	if err != nil {
 		return k, fmt.Errorf("grid rows: %w", err)
@@ -837,7 +1101,7 @@ func (st *ductingLinksState) serve(w http.ResponseWriter, r *http.Request, s *Se
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, DuctingLinksResponse{
 			Status: "error", Error: "long-link analysis is unavailable", FreqMHz: ductingLinksFreq(s.cfg),
-			Days: days, GeneratedAt: st.now().Unix(), Summary: DuctingLinksSummary{BaselineDuctFrac: -1}, Links: []DuctingLink{},
+			Days: days, GeneratedAt: st.now().Unix(), Summary: ductingLinksEmptySummary(s.ductingLinksLOSMethod()), Links: []DuctingLink{},
 		})
 		return
 	}
@@ -867,7 +1131,7 @@ func (st *ductingLinksState) get(s *Server, src ductingStepSource, days int) ([]
 			// Nothing stored yet: skip the store scan entirely.
 			resp = &DuctingLinksResponse{
 				Status: "pending", FreqMHz: ductingLinksFreq(s.cfg), Days: days, GeneratedAt: now.Unix(),
-				Summary: DuctingLinksSummary{BaselineDuctFrac: -1}, Links: []DuctingLink{},
+				Summary: ductingLinksEmptySummary(k.losMethod), Links: []DuctingLink{},
 			}
 		} else {
 			gather := st.gather
@@ -878,7 +1142,7 @@ func (st *ductingLinksState) get(s *Server, src ductingStepSource, days int) ([]
 			if err != nil {
 				return nil, err
 			}
-			in.Memo = st.memo
+			in.Memo, in.LOS = st.memo, st.los
 			if resp, err = buildDuctingLinks(in, src, now); err != nil {
 				return nil, err
 			}

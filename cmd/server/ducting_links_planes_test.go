@@ -81,7 +81,7 @@ func TestDuctingLinksPlanesEqualsLoad(t *testing.T) {
 func TestDuctingGridLoadPlanes(t *testing.T) {
 	f := newDuctingGridFixture(t)
 	f.putGrid(t, 3600, 3600, 3700)
-	var d ducting.Decoder
+	d := ducting.Decoder{N: true} // as the links analysis decodes: C, F and N
 	g, err := f.svc.LoadPlanes(3600, &d)
 	if err != nil || g.ValidTime != 3600 || g.RunTime != 3600 {
 		t.Fatalf("LoadPlanes: %v %+v", err, g)

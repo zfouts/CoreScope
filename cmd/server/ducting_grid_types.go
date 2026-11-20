@@ -97,17 +97,36 @@ type DuctingLinksResponse struct {
 	Links       []DuctingLink       `json:"links"`
 }
 
-// DuctingLinksSummary compares long-link receptions with how often the same
-// paths are ducted at all.
+// DuctingLinksSummary compares long-link receptions with how the same paths
+// are refracted at all. A pair is listed only when it is beyond line of
+// sight (LosMethod says how that was decided).
 type DuctingLinksSummary struct {
-	Links      int `json:"links"`      // distinct node pairs (before the ductingLinksMaxPairs cap)
+	Links      int `json:"links"`      // distinct beyond-line-of-sight node pairs (before the ductingLinksMaxPairs cap)
 	Receptions int `json:"receptions"` // receptions over all pairs
-	WithGrid   int `json:"withGrid"`   // receptions with a stored step within ±90 min
+	WithGrid   int `json:"withGrid"`   // receptions with a stored step within ±90 min and data along the path
 	DuringDuct int `json:"duringDuct"` // of WithGrid: path duct share >= ductingLinksDuctFrac
 	// BaselineDuctFrac: over every stored step in the period and every pair,
 	// the share of (pair, step) combinations whose path duct share >=
 	// ductingLinksDuctFrac. -1 when there is no data.
 	BaselineDuctFrac float64 `json:"baselineDuctFrac"`
+	// RecvMeanGradNkm: mean, over receptions with a path mean dN/dh, of that
+	// mean (N/km; more negative bends more). BaselineMeanGradNkm: the same
+	// over the (pair, step) combinations of BaselineDuctFrac. nil: no data.
+	RecvMeanGradNkm     *float64 `json:"recvMeanGradNkm"`
+	BaselineMeanGradNkm *float64 `json:"baselineMeanGradNkm"`
+	// RecvEnhancedFrac: of WithGrid, the share whose path enhanced share
+	// (superFrac) >= ductingLinksDuctFrac; BaselineEnhancedFrac: the same
+	// over the baseline combinations. -1 when there is no data.
+	RecvEnhancedFrac     float64 `json:"recvEnhancedFrac"`
+	BaselineEnhancedFrac float64 `json:"baselineEnhancedFrac"`
+	// LosMethod: "terrain" (SRTM profile at los.kFactor; endpoint elevations
+	// past the profile leg limit) or "smooth-earth" (antenna heights only,
+	// k = 4/3; LoS terrain not enabled).
+	LosMethod string `json:"losMethod"`
+	// UnverifiedPairs: pairs past the antenna-height horizon whose terrain
+	// check has not run yet (per-rebuild budget, tiles loading) or had no
+	// terrain data; they are left out until verified.
+	UnverifiedPairs int `json:"unverifiedPairs"`
 }
 
 // DuctingLink is one node pair: A transmitted the advert, B (an observer
@@ -138,5 +157,8 @@ type DuctingReception struct {
 	SNR       *float64 `json:"snr,omitempty"` // observer receptions only (a path's SNR is the last hop's link to the observer)
 	RSSI      *float64 `json:"rssi,omitempty"`
 	DuctFrac  float64  `json:"ductFrac"`  // share of path samples whose duct can carry FreqMHz; -1 = no stored step
-	SuperFrac float64  `json:"superFrac"` // share of path samples that are super-refractive; -1 = no stored step
+	SuperFrac float64  `json:"superFrac"` // share of path samples at least super-refractive (super or duct); -1 = no stored step
+	// MeanGradNkm is the mean dN/dh (N/km) along the path; nil without a
+	// stored step or without values along the path.
+	MeanGradNkm *float64 `json:"meanGradNkm"`
 }

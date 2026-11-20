@@ -92,8 +92,15 @@ type Window struct {
 // every spacingKm (at least the two end points), using the nearest lattice
 // point for each sample.
 type PathStats struct {
-	Samples int // samples taken
-	NoData  int // samples whose point has C == ClassNoData (or is outside the lattice)
-	Duct    int // samples where CarriesLoRa(C, F, freqMHz)
-	Super   int // samples with C == ClassSuper
+	Samples  int // samples taken
+	NoData   int // samples whose point has C == ClassNoData (or is outside the lattice)
+	Duct     int // samples where CarriesLoRa(C, F, freqMHz)
+	Super    int // samples with C == ClassSuper
+	Enhanced int // samples with C >= ClassSuper: super-refractive or ducting
+	// MeanN is the mean of the non-zero N (mean dN/dh, N/km) over the
+	// samples with data; NCount is how many samples it averages (N = 0 is
+	// "no value" in the grid). 0 and 0 when there are none, or when the
+	// grid carries no N plane (Decoder without N).
+	MeanN  float64
+	NCount int
 }

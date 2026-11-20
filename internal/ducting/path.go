@@ -36,6 +36,7 @@ func (g *Grid) PathStats(lat1, lon1, lat2, lon2, freqMHz, spacingKm float64) Pat
 	}
 
 	var st PathStats
+	var sumN float64
 	for s := 0; s < n; s++ {
 		a := delta * float64(s) / float64(n-1)
 		p := add(scale(p1, math.Cos(a)), scale(u, math.Sin(a)))
@@ -53,6 +54,16 @@ func (g *Grid) PathStats(lat1, lon1, lat2, lon2, freqMHz, spacingKm float64) Pat
 		if g.C[idx] == ClassSuper {
 			st.Super++
 		}
+		if g.C[idx] >= ClassSuper {
+			st.Enhanced++
+		}
+		if idx < len(g.N) && g.N[idx] != 0 {
+			sumN += float64(g.N[idx])
+			st.NCount++
+		}
+	}
+	if st.NCount > 0 {
+		st.MeanN = sumN / float64(st.NCount)
 	}
 	return st
 }

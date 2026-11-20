@@ -8,7 +8,8 @@ import (
 )
 
 // decodePlanesAgrees checks that DecodePlanes accepts exactly what Decode
-// accepts and, when it does, yields the same header, C and F planes.
+// accepts and, when it does, yields the same header, C and F planes, and N
+// when d.N is set (nil otherwise).
 func decodePlanesAgrees(t *testing.T, d *Decoder, name string, b []byte) bool {
 	t.Helper()
 	want, werr := Decode(b)
@@ -27,14 +28,33 @@ func decodePlanesAgrees(t *testing.T, d *Decoder, name string, b []byte) bool {
 	if !reflect.DeepEqual(got.C, want.C) || !reflect.DeepEqual(got.F, want.F) {
 		t.Fatalf("%s: C or F plane differs", name)
 	}
-	if a, b := got.PathStats(10, 170, -10, -170, 869.5, 50), want.PathStats(10, 170, -10, -170, 869.5, 50); a != b {
-		t.Fatalf("%s: PathStats %+v vs %+v", name, a, b)
+	a, w := got.PathStats(10, 170, -10, -170, 869.5, 50), want.PathStats(10, 170, -10, -170, 869.5, 50)
+	if d.N {
+		if !reflect.DeepEqual(got.N, want.N) {
+			t.Fatalf("%s: N plane differs", name)
+		}
+	} else {
+		if got.N != nil {
+			t.Fatalf("%s: N filled without Decoder.N", name)
+		}
+		w.MeanN, w.NCount = 0, 0 // no N plane: no mean
+	}
+	if a != w {
+		t.Fatalf("%s: PathStats %+v vs %+v", name, a, w)
 	}
 	return true
 }
 
 func TestDecodePlanesMatchesDecode(t *testing.T) {
-	var d Decoder // one decoder for every case: failures must not poison it
+	for _, withN := range []bool{false, true, false} { // and back: N must not linger
+		t.Run(map[bool]string{false: "CF", true: "CFN"}[withN], func(t *testing.T) {
+			testDecodePlanesMatchesDecode(t, withN)
+		})
+	}
+}
+
+func testDecodePlanesMatchesDecode(t *testing.T, withN bool) {
+	d := Decoder{N: withN} // one decoder for every case: failures must not poison it
 	for _, tc := range []struct{ ni, nj int }{{6, 4}, {720, 361}, {7, 3}, {6, 4}} {
 		b, err := Encode(randomGrid(t, tc.ni, tc.nj, int64(tc.ni)))
 		if err != nil {
@@ -55,6 +75,8 @@ func TestDecodePlanesMatchesDecode(t *testing.T) {
 		"no payload":       encodeRaw("gfs", 6, 4, 90, 0, -0.5, 0.5, nil),
 		"short inflate":    encodeRaw("gfs", 6, 4, 90, 0, -0.5, 0.5, deflate(okRaw[:len(okRaw)-1])),
 		"short in C/F":     encodeRaw("gfs", 6, 4, 90, 0, -0.5, 0.5, deflate(okRaw[:2*6*4])),
+		"short in B..G":    encodeRaw("gfs", 6, 4, 90, 0, -0.5, 0.5, deflate(okRaw[:6*6*4])),
+		"short in N":       encodeRaw("gfs", 6, 4, 90, 0, -0.5, 0.5, deflate(okRaw[:12*6*4])),
 		"long inflate":     encodeRaw("gfs", 6, 4, 90, 0, -0.5, 0.5, deflate(append(okRaw[:len(okRaw):len(okRaw)], 0))),
 		"bomb":             encodeRaw("gfs", 6, 4, 90, 0, -0.5, 0.5, deflate(make([]byte, 64<<20))),
 		"trailing garbage": append(append([]byte(nil), good...), 0, 1, 2),
@@ -86,7 +108,7 @@ func TestDecodePlanesReusesBuffers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var d Decoder
+	d := Decoder{N: true} // the larger case: C, F and N
 	if _, err := d.DecodePlanes(b); err != nil {
 		t.Fatal(err)
 	}

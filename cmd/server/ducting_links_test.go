@@ -200,7 +200,8 @@ func TestDuctingLinksDuctAlongPathAndStepWindow(t *testing.T) {
 		if r.T != wantT[i] || r.DuctFrac != wantD[i] {
 			t.Errorf("reception %d = %+v, want t=%d duct=%v", i, r, wantT[i], wantD[i])
 		}
-		if wantD[i] >= 0 && r.SuperFrac != 0 {
+		// superFrac counts ducts too (C >= ClassSuper): here it is the duct share.
+		if wantD[i] >= 0 && r.SuperFrac != wantD[i] {
 			t.Errorf("reception %d superFrac = %v", i, r.SuperFrac)
 		}
 	}
@@ -243,7 +244,7 @@ func TestDuctingLinksPathFracs(t *testing.T) {
 		ps          ducting.PathStats
 		duct, super float64
 	}{
-		{ducting.PathStats{Samples: 10, NoData: 2, Duct: 4, Super: 2}, 0.5, 0.25},
+		{ducting.PathStats{Samples: 10, NoData: 2, Duct: 4, Super: 2, Enhanced: 6}, 0.5, 0.75},
 		{ducting.PathStats{Samples: 5, NoData: 5}, -1, -1},
 		{ducting.PathStats{}, -1, -1},
 	} {
@@ -422,7 +423,7 @@ func TestDuctingLinksMemo(t *testing.T) {
 func TestDuctingLinksMemoBound(t *testing.T) {
 	m := newDuctingLinksMemo(3)
 	for i := 0; i < 5; i++ {
-		m.put(ductingLinksMemoKey{obsID: i}, ductingLinksMemoVal{duct: float64(i)})
+		m.put(ductingLinksMemoKey{obsID: i}, ductingPathMetric{duct: float64(i)})
 	}
 	if m.len() != 3 {
 		t.Fatalf("len = %d", m.len())
@@ -433,7 +434,7 @@ func TestDuctingLinksMemoBound(t *testing.T) {
 			t.Errorf("key %d present=%v; oldest must go first", i, ok)
 		}
 	}
-	m.put(ductingLinksMemoKey{obsID: 4}, ductingLinksMemoVal{duct: 9}) // update: no eviction
+	m.put(ductingLinksMemoKey{obsID: 4}, ductingPathMetric{duct: 9}) // update: no eviction
 	if v, _ := m.get(ductingLinksMemoKey{obsID: 2}); v.duct != 2 || m.len() != 3 {
 		t.Errorf("update evicted")
 	}

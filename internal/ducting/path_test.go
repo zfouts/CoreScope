@@ -117,3 +117,68 @@ func BenchmarkPathStats500km(b *testing.B) {
 		g.PathStats(45, -122, 41, -118, 915, 10) // ~550 km, 56 samples
 	}
 }
+
+// Enhanced counts every sample at or above super-refraction (ducts too);
+// MeanN averages the non-zero N of the samples with data.
+func TestPathStatsEnhancedAndMeanN(t *testing.T) {
+	g := gfsGrid(t)
+	for idx := range g.C {
+		lat, _ := g.LatLon(idx)
+		switch {
+		case lat >= 10 && lat <= 20:
+			g.Set(idx, Result{Class: ClassSurface, FminMHz: 400, MeanGradNkm: -160})
+		case lat > 20 && lat <= 25:
+			g.Set(idx, Result{Class: ClassSuper, MeanGradNkm: -90})
+		case lat > 25 && lat <= 27:
+			g.Set(idx, Result{Class: ClassNormal}) // N = 0: no value
+		case lat > 27:
+			g.Set(idx, Result{}) // no data
+		default:
+			g.Set(idx, Result{Class: ClassNormal, MeanGradNkm: -40})
+		}
+	}
+	st := g.PathStats(0, 0, 30, 0, 869.5, 50)
+	var want PathStats
+	var sum float64
+	for s := 0; s < PathMaxSamples; s++ {
+		lat := snapHalf(30 * float64(s) / 63)
+		want.Samples++
+		switch {
+		case lat >= 10 && lat <= 20:
+			want.Duct++
+			want.Enhanced++
+			sum += -160
+			want.NCount++
+		case lat > 20 && lat <= 25:
+			want.Super++
+			want.Enhanced++
+			sum += -90
+			want.NCount++
+		case lat > 25 && lat <= 27:
+		case lat > 27:
+			want.NoData++
+		default:
+			sum += -40
+			want.NCount++
+		}
+	}
+	want.MeanN = sum / float64(want.NCount)
+	if math.Abs(st.MeanN-want.MeanN) > 1e-9 {
+		t.Fatalf("MeanN %v want %v", st.MeanN, want.MeanN)
+	}
+	st.MeanN = want.MeanN
+	if st != want {
+		t.Fatalf("got %+v\nwant %+v", st, want)
+	}
+
+	// No N plane (a Decoder without N): counts unchanged, no mean.
+	g.N = nil
+	st2 := g.PathStats(0, 0, 30, 0, 869.5, 50)
+	if st2.MeanN != 0 || st2.NCount != 0 || st2.Enhanced != want.Enhanced || st2.Duct != want.Duct {
+		t.Fatalf("without N: %+v", st2)
+	}
+	// All without a value: 0 and 0.
+	if st := g.PathStats(26, 0, 26.5, 0, 869.5, 50); st.NCount != 0 || st.MeanN != 0 {
+		t.Fatalf("no values: %+v", st)
+	}
+}

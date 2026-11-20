@@ -258,23 +258,29 @@ func checkPayloadEnd(lr io.Reader, src *bytes.Reader) error {
 	return nil
 }
 
-// Decoder decodes only the planes PathStats reads (C and F) and reuses its
-// buffers between calls, for scans that walk many stored steps one at a time
-// (the long-link analysis): Decode allocates the 13-byte-per-point inflate
-// buffer and seven plane slices per call, ~3.5 MB for a 0.5° world grid.
-// The zero value is ready. Not safe for concurrent use.
+// Decoder decodes only the planes PathStats reads (C and F, and N when
+// N is set) and reuses its buffers between calls, for scans that walk many
+// stored steps one at a time (the long-link analysis): Decode allocates the
+// 13-byte-per-point inflate buffer and seven plane slices per call, ~3.5 MB
+// for a 0.5° world grid. The zero value is ready (C and F only). Not safe
+// for concurrent use.
 type Decoder struct {
-	g   Grid
-	fr  io.ReadCloser
-	src bytes.Reader
-	f   []byte
+	// N also fills the N plane (mean dN/dh), for PathStats.MeanN.
+	N bool
+
+	g      Grid
+	fr     io.ReadCloser
+	src    bytes.Reader
+	f      []byte
+	nPlane []int16
 }
 
 // DecodePlanes validates b exactly as Decode does (header, inflated size,
 // trailing bytes, class range) but fills only the header fields and the C and
-// F planes of the returned grid; B, T, DM, G and N are nil, so only Nearest,
-// LatLon and PathStats (and CarriesLoRa on C/F) are meaningful. The grid and
-// its slices are owned by d and valid until the next DecodePlanes call.
+// F planes of the returned grid, plus N when d.N is set; the other planes are
+// nil, so only Nearest, LatLon and PathStats (and CarriesLoRa on C/F) are
+// meaningful. The grid and its slices are owned by d and valid until the
+// next DecodePlanes call.
 func (d *Decoder) DecodePlanes(b []byte) (*Grid, error) {
 	gh, err := parseHeader(b)
 	if err != nil {
@@ -304,8 +310,26 @@ func (d *Decoder) DecodePlanes(b []byte) (*Grid, error) {
 	}
 	d.g.F = slices.Grow(d.g.F[:0], n)[:n]
 	getU16s(d.f, 0, d.g.F)
-	// The other planes are not needed: skip them, still checking the size.
 	rest := expected - int64(3*n)
+	d.g.N = nil
+	if d.N {
+		// N is the last plane: skip B, T, DM and G, then read it.
+		skip := int64(8 * n)
+		if got, err := io.CopyN(io.Discard, lr, skip); got < skip {
+			if err == nil || err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			return nil, fmt.Errorf("ducting: grid payload: %w", err)
+		}
+		if _, err := io.ReadFull(lr, d.f); err != nil {
+			return nil, fmt.Errorf("ducting: grid payload: %w", err)
+		}
+		d.nPlane = slices.Grow(d.nPlane[:0], n)[:n]
+		getI16s(d.f, 0, d.nPlane)
+		d.g.N = d.nPlane
+		rest -= int64(10 * n)
+	}
+	// The other planes are not needed: skip them, still checking the size.
 	got, err := io.Copy(io.Discard, lr)
 	if err != nil {
 		return nil, fmt.Errorf("ducting: grid payload: %w", err)
