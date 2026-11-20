@@ -54,8 +54,13 @@ type ductingStepSource interface {
 	// Rows returns the stored rows of the model, ascending by ValidTime
 	// (cached; refreshed at most once a minute).
 	Rows() ([]ductingGridRow, error)
-	// Step returns the decoded grid for an exact stored valid time.
+	// Step returns the decoded grid for an exact stored valid time, through
+	// the LRU (ductingGridLRUSteps entries, singleflight per valid time).
 	Step(validTime int64) (*ducting.Grid, error)
+	// Load decodes a stored valid time without touching the LRU, for bulk
+	// scans (the long-link analysis) that would otherwise evict the steps
+	// the map is showing.
+	Load(validTime int64) (*ducting.Grid, error)
 }
 
 // DuctingMetaResponse is GET /api/ducting/meta.
