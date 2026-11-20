@@ -37,12 +37,12 @@
      "snr": -5.5,
      "rssi": -118,
      "ductFrac": 0.8,
-     "superFrac": 1
+     "superFrac": 1,
+     "via": "observer"
     },
     {
      "t": 1795026400,
-     "snr": 2,
-     "rssi": -101,
+     "via": "relay",
      "ductFrac": 0.1,
      "superFrac": 0.4
     }
@@ -71,7 +71,7 @@
    "receptions": [
     {
      "t": 1795044600,
-     "snr": -12.25,
+     "via": "relay",
      "ductFrac": 0.2,
      "superFrac": 0
     }
@@ -102,7 +102,8 @@
      "t": 1795051800,
      "rssi": -125,
      "ductFrac": -1,
-     "superFrac": -1
+     "superFrac": -1,
+     "via": "observer"
     }
    ]
   },
@@ -130,7 +131,8 @@
     {
      "t": 1795051801,
      "ductFrac": 0.9,
-     "superFrac": 1
+     "superFrac": 1,
+     "via": "observer"
     }
    ]
   }

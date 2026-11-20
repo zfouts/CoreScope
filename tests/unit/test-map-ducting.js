@@ -1758,7 +1758,7 @@ test('grid: link popup shows node names as text only (a hostile name stays inert
   assert.ok(!('innerHTML' in box) || box.innerHTML === undefined);
   assert.ok(text.indexOf('190 km apart; radio horizon 59 km') >= 0);
   assert.ok(text.indexOf('Antenna heights: sender 12 m, receiver 10 m (site default)') >= 0);
-  assert.ok(/SNR −5\.5 dB · RSSI −118 dBm · modelled duct along 80% of the path, super-refraction along 100%/.test(text), text);
+  assert.ok(/ · heard directly by the observer · SNR −5\.5 dB · RSSI −118 dBm · modelled duct along 80% of the path, super-refraction along 100%/.test(text), text);
   assert.ok(text.indexOf('Heard 3 times in the period') >= 0);
   assert.ok(text.indexOf('a duct that can carry 869.525 MHz') >= 0);
   // No model data, no name (key prefix), a very long name capped.
@@ -1769,6 +1769,29 @@ test('grid: link popup shows node names as text only (a hostile name stays inert
   long.a.name = 'x'.repeat(500);
   const t = ctx.MC_ductLinkPopup({ link: long, recs: long.receptions, kind: 'duct' }, 0).textContent;
   assert.ok(t.indexOf('x'.repeat(63) + '…') >= 0 && t.indexOf('x'.repeat(64)) < 0, 'name capped at 64 characters');
+});
+
+test('grid: link popup says how each reception was heard; a relay reception shows no SNR/RSSI', () => {
+  const { ctx } = makeGridSandbox();
+  // aa11's older reception (T - 20000 s) and cc33's only one are relay receptions without SNR/RSSI.
+  const relay = ctx.MC_ductLinksAt(GLINKS.links, GT - 20000, 0)[0];
+  const lines = find(ctx.MC_ductLinkPopup(relay, 869.525), n => n.tagName === 'li').map(n => n.textContent);
+  assert.strictEqual(lines.length, 1);
+  assert.ok(/ · relayed: the second repeater heard the first directly · modelled duct along 10% of the path/.test(lines[0]), lines[0]);
+  assert.ok(lines[0].indexOf('SNR') < 0 && lines[0].indexOf('RSSI') < 0, 'absent values are left out');
+  const cc = ctx.MC_ductLinksAt(GLINKS.links, GT - 1800, 0)[0];
+  assert.strictEqual(cc.link.a.pubkey, 'cc33');
+  const t = ctx.MC_ductLinkPopup(cc, 869.525).textContent;
+  assert.ok(t.indexOf('relayed: the second repeater heard the first directly') >= 0 && t.indexOf('SNR') < 0);
+  // Both kinds in one list, nearest first; an unknown or missing via says nothing about it.
+  const mixed = { link: GLINKS.links[0], recs: [
+    { t: GT, via: 'observer', snr: 3, ductFrac: 0.6 }, { t: GT + 60, via: 'relay', ductFrac: 0.2 },
+    { t: GT + 120, via: '<b>x</b>', rssi: -100, ductFrac: 0 }, { t: GT + 180, ductFrac: -1 }], kind: 'duct' };
+  const li = find(ctx.MC_ductLinkPopup(mixed, 869.525), n => n.tagName === 'li').map(n => n.textContent);
+  assert.ok(li[0].indexOf('heard directly by the observer · SNR 3.0 dB') > 0, li[0]);
+  assert.ok(li[1].indexOf('relayed: the second repeater heard the first directly') > 0 && li[1].indexOf('SNR') < 0);
+  assert.ok(li[2].indexOf('<b>x</b>') < 0 && li[2].indexOf('heard directly') < 0 && li[2].indexOf('relayed') < 0, li[2]);
+  assert.ok(li[3].indexOf('heard directly') < 0 && li[3].indexOf('relayed') < 0 && li[3].indexOf('no model data') > 0, li[3]);
 });
 
 test('grid: on add fetches meta and links (historyDays), not /api/ducting; default time = latest <= now', async () => {

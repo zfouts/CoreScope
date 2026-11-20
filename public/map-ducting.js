@@ -908,8 +908,14 @@
     return s.charAt(0) === '-' ? MINUS + s.slice(1) : s;
   }
 
+  // How a reception was heard (the API's via); nothing for an unknown value.
+  var VIA_TEXT = { observer: 'heard directly by the observer', relay: 'relayed: the second repeater heard the first directly' };
+
+  // One reception: time, how it was heard, SNR/RSSI when present (a relay
+  // reception has none), the modelled duct share.
   function recLine(r) {
     var parts = [fmtTime(Number(r.t))];
+    if (typeof r.via === 'string' && Object.prototype.hasOwnProperty.call(VIA_TEXT, r.via)) parts.push(VIA_TEXT[r.via]);
     if (r.snr != null && isFinite(Number(r.snr))) parts.push('SNR ' + fmtNum(r.snr, 1) + ' dB');
     if (r.rssi != null && isFinite(Number(r.rssi))) parts.push('RSSI ' + fmtNum(r.rssi, 0) + ' dBm');
     var f = Number(r.ductFrac);
