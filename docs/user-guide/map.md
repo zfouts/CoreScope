@@ -49,17 +49,28 @@ To share a time, copy the page address: `#/map?duct=1&ductT=<unix time>` opens t
 
 #### Observed long links
 
-With the overlay on, the map also draws lines for **observed long links**: a node heard directly by an observer, with no relay in between (a zero-hop advert), from farther away than the radio normally reaches. The cut-off is the radio horizon for the two antenna heights, `4.12 x (sqrt(h1) + sqrt(h2))` km with heights in metres, and links over 1,000 km are dropped as probably wrong positions. Heights are the ones users entered for their repeaters where the site has them, otherwise the site's default antenna height, so a link can be drawn or left out because of a guessed height.
+With the overlay on, the map also draws lines for **observed long links**: two nodes that hear each other directly although there is no line of sight between them. Two kinds of evidence count, and only when the nodes are certain: a node heard by an observer with no relay in between (a zero-hop advert), and two repeaters in a relayed path whose short IDs each match exactly one node (origin to first relay, and relay to relay). Clicking a line says which kind each reception was; relayed ones have no signal strength.
 
-Only links heard within 90 minutes of the selected time are drawn, so moving the slider moves the set. Click a line for the two nodes, the distance, the horizon, and the recent receptions with signal strength.
+"No line of sight" is decided from terrain when the site has line-of-sight terrain turned on, otherwise from the antennas' heights alone (the radio horizon). Heights are the ones users entered for their repeaters where the site has them, otherwise the site's default antenna height. Links over 1,000 km are dropped as probably wrong positions. A pair the site has not checked yet is left out and counted in the legend as "not checked yet".
 
-- A **solid line in the highlight colour** was heard while the model shows a duct that can carry this site's LoRa frequency along at least half of the path.
-- A **solid line in the other colour** was heard with less or no modelled duct along the path.
-- A **dashed line** has no model data for that time.
+Only links heard within 90 minutes of the selected time are drawn, so moving the slider moves the set. Click a line for the two nodes, the distance, and the recent receptions (one per 3-hour step) with the modelled gradient along the path.
 
-The legend adds a one-line summary for the period, for example "Last 7 days: 40 direct receptions beyond the radio horizon on 9 node pairs. 30% were during a modelled duct along the path; the same paths were ducted 12% of the time overall." Read the two percentages together: the second is how often those paths are ducted in the model at all, so the first is only interesting if it is clearly higher. It is a comparison of model output with receptions, not proof of cause. A reception outside a modelled duct is common, because the model is coarse (see below), and long links also come from wrong positions, high sites and line of sight over water.
+- A **solid line in the highlight colour**: half or more of the path was in the High band (-62 N/km or stronger) in the model.
+- A **solid line in the other colour**: less of the path was in the High band.
+- A **dashed line**: no model data for that time.
 
-Hidden and blacklisted nodes and observers never appear. Positions are self-reported. The colours of the bands, outline, edge and links can be changed in the customizer under **Ducting overlay**.
+The legend adds a summary for the period, for example "Last 7 days: 40 receptions on the 9 longest node pairs without terrain line of sight. Along their paths the modelled refractivity gradient averaged -45 N/km when heard, against -44 N/km for the same paths over the whole period". Read each pair of numbers together: the second is the same paths at every time in the period, so the first only matters if it is clearly more negative.
+
+Below it, a table gives **how often the pairs were heard, by path gradient**: for each band of the modelled gradient along the path, the share of 3-hour steps in which the pair was heard (n is the number of pair-steps). If ducting matters, the share would rise towards the High band. The second column is for intermittent pairs only, those heard in some but not nearly all of their steps. This is the column to look at, because a pair that is heard almost every time is heard whatever the weather and says nothing about it.
+
+How to read it honestly:
+
+- A flat table means no visible link between the modelled gradient and being heard. A rising one is a hint, not proof.
+- The model has 0.5 degree cells and levels about 200 m apart, so thin ducts are invisible. A low share in the High band does not mean no duct.
+- Positions are self-reported; a wrong position makes a link look long.
+- Where antennas are higher than the default height, "no line of sight" can be wrong, and where the site has no terrain data it ignores hills. Either way the list may contain pairs that did have line of sight, or miss some that did not.
+
+Hidden and blacklisted nodes and observers never appear. The colours of the bands, outline, edge and links can be changed in the customizer under **Ducting overlay**.
 
 The legend shows the same bands as a bar, labelled Normal, Above normal, High and Very high. Use the time slider to move through the forecast (see below for history). Click anywhere in the field for the details of that grid cell: the gradient over the lowest 1.5 km, the type of layer found in the model (normal, super-refraction, elevated duct or surface-based duct), base and top of the layer (metres above ground), strength, the lowest trapped frequency ("≈ … MHz (model estimate)", to two significant figures) and a LoRa verdict for each frequency judged (this site's, or 868 and 915 MHz separately): "LoRa … MHz: possibly trapped (model estimate)" or "not trapped by this layer". The verdict compares the rounded figure shown, so within a few MHz of the frequency the answer is decided by rounding, not by the data. For a duct, the popup also notes that the model's levels are about 200 m apart, so thinner layers are not resolved. An elevated duct is a layer above the ground and mostly helps nodes that sit inside it, such as repeaters on high sites; a surface-based duct reaches the ground. The legend also shows the weather model, the data attribution and when the data was last updated.
 
