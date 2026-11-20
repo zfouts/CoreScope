@@ -371,7 +371,7 @@ func (s *ductingService) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	etag := ductingETag(snap.resp)
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.Header().Set("ETag", etag)
-	if r != nil && ductingETagMatches(r.Header.Get("If-None-Match"), etag) {
+	if r != nil && ductingETagListMatches(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -381,19 +381,6 @@ func (s *ductingService) serveHTTP(w http.ResponseWriter, r *http.Request) {
 // ductingETag is the strong ETag of an ok snapshot: "<generatedAt>-<model>".
 func ductingETag(resp DuctingResponse) string {
 	return `"` + strconv.FormatInt(resp.GeneratedAt, 10) + "-" + resp.Model + `"`
-}
-
-// ductingETagMatches reports whether an If-None-Match header names etag:
-// "*", or a comma-separated list compared weakly (a W/ prefix is ignored),
-// as RFC 9110 13.1.2 asks for If-None-Match.
-func ductingETagMatches(header, etag string) bool {
-	for _, t := range strings.Split(header, ",") {
-		t = strings.TrimSpace(t)
-		if t == "*" || strings.TrimPrefix(t, "W/") == etag {
-			return true
-		}
-	}
-	return false
 }
 
 // handleDucting is GET /api/ducting; 404 unless ducting.enabled.
