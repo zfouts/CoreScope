@@ -57,7 +57,7 @@
     inputBg: '--input-bg', rowStripe: '--row-stripe', rowHover: '--row-hover', selectedBg: '--selected-bg',
     ductS1: '--mc-duct-s1', ductS2: '--mc-duct-s2', ductS3: '--mc-duct-s3', ductS4: '--mc-duct-s4',
     ductS5: '--mc-duct-s5', ductS6: '--mc-duct-s6', ductS7: '--mc-duct-s7', ductS8: '--mc-duct-s8',
-    ductLora: '--mc-duct-lora', ductEdge: '--mc-duct-edge', ductLink: '--mc-duct-link', ductLinkDuct: '--mc-duct-link-duct',
+    ductLora: '--mc-duct-lora', ductEdge: '--mc-duct-edge', ductLink: '--mc-duct-link', ductLinkDuct: '--mc-duct-link-duct', ductLinkCasing: '--mc-duct-link-casing',
     font: '--font', mono: '--mono'
   };
 
@@ -312,7 +312,7 @@
     ductS1: 'Ducting band 1 (weakest)', ductS2: 'Ducting band 2', ductS3: 'Ducting band 3',
     ductS4: 'Ducting band 4', ductS5: 'Ducting band 5', ductS6: 'Ducting band 6', ductS7: 'Ducting band 7',
     ductS8: 'Ducting band 8 (strongest)', ductLora: 'Ducting LoRa outline', ductEdge: 'Ducting forecast edge',
-    ductLink: 'Long link', ductLinkDuct: 'Long link during a duct',
+    ductLink: 'Long link', ductLinkDuct: 'Long link during a duct', ductLinkCasing: 'Long link outline',
     font: 'Body Font', mono: 'Mono Font'
   };
 
@@ -392,7 +392,7 @@
 
   var BASIC_KEYS = ['accent', 'navBg', 'navText', 'background', 'text', 'statusGreen', 'statusYellow', 'statusRed'];
   var ADVANCED_KEYS = ['accentHover', 'navBg2', 'navTextMuted', 'navActiveBg', 'textMuted', 'border', 'surface1', 'surface2', 'cardBg', 'contentBg', 'detailBg', 'inputBg', 'rowStripe', 'rowHover', 'selectedBg'];
-  var DUCT_KEYS = ['ductS1', 'ductS2', 'ductS3', 'ductS4', 'ductS5', 'ductS6', 'ductS7', 'ductS8', 'ductLora', 'ductEdge', 'ductLink', 'ductLinkDuct'];
+  var DUCT_KEYS = ['ductS1', 'ductS2', 'ductS3', 'ductS4', 'ductS5', 'ductS6', 'ductS7', 'ductS8', 'ductLora', 'ductEdge', 'ductLink', 'ductLinkDuct', 'ductLinkCasing'];
   var FONT_KEYS = ['font', 'mono'];
 
   // ── Validation helpers ──

@@ -706,7 +706,7 @@ test('_gfReapply: prune follows the saved polygon, not unsaved drawing', () => {
 
 test('ducting colours are in THEME_CSS_MAP and fall back to the stylesheet value', () => {
   const { ctx, api } = loadCustomizer();
-  for (const k of ['ductS1', 'ductS8', 'ductLora', 'ductEdge', 'ductLink', 'ductLinkDuct']) {
+  for (const k of ['ductS1', 'ductS8', 'ductLora', 'ductEdge', 'ductLink', 'ductLinkDuct', 'ductLinkCasing']) {
     assert.ok(/^--mc-duct-/.test(api.THEME_CSS_MAP[k]), k + ' mapped');
   }
   assert.strictEqual(api.THEME_CSS_MAP.ductAlpha, undefined, 'opacity is not a colour');
