@@ -103,8 +103,8 @@
  *     (losMethod "terrain"; else beyond the smooth-earth radio horizon).
  *     The ones within +-90 min of the shown time are drawn as
  *     non-interactive lines on the line canvas (--mc-duct-link-duct when
- *     half or more of that reception's path was super-refractive or
- *     ducting in the model, else --mc-duct-link; dashed without a modelled
+ *     half or more of that reception's path was in the legend's High band
+ *     or stronger in the model, else --mc-duct-link; dashed without a modelled
  *     path gradient; the solid ones over a --mc-duct-link-casing halo). The
  *     map click handler opens a link popup for a click
  *     within 6 px of one before it looks up a cell. Names are node-chosen
@@ -196,7 +196,7 @@
   var GRID_MAX_CELLS = 4000;            // the server's cap per window
   var STEP_LADDER = [1, 2, 4, 8, 16];   // x the native step (0.5 -> 0.5..8 deg)
   var LINK_WINDOW_S = 90 * 60;          // receptions drawn within +-90 min
-  var LINK_ENHANCED_FRAC = 0.5;         // emphasized: half the path or more super-refractive or ducting
+  var LINK_ENHANCED_FRAC = 0.5;         // emphasized: half the path or more in the High band or stronger (highFrac)
   var LINK_HIT_PX = 6;
   var LINK_MAX_RECS = 5;                // receptions listed in a link popup
   var NAME_MAX = 64;
@@ -825,13 +825,15 @@
   function num(v) { return (v != null && v !== '' && isFinite(Number(v))) ? Number(v) : null; }
 
   // The line kind of a reception: 'duct' (the emphasized colour) when half
-  // or more of the path was super-refractive or ducting in the model,
+  // or more of the path was in the legend's High band or stronger
+  // (highFrac: path samples with a mean gradient <= STOP_N[4], -62 N/km),
   // 'plain' when less, 'nodata' without a modelled path gradient (no stored
-  // step). The yes/no "duct can carry LoRa" test is almost never true at
-  // GFS resolution, so it does not decide the colour.
+  // step). Neither the yes/no "duct can carry LoRa" test (almost never true
+  // at GFS resolution) nor the class-based super-refractive share
+  // (saturated over humid land) decides the colour.
   function linkKind(r) {
     if (!r || num(r.meanGradNkm) == null) return 'nodata';
-    var f = num(r.superFrac);
+    var f = frac(r.highFrac);
     return (f != null && f >= LINK_ENHANCED_FRAC) ? 'duct' : 'plain';
   }
 
@@ -910,7 +912,7 @@
   // The legend's period summary: only what the numbers say, leading with
   // the modelled path gradient when heard against the same paths over the
   // whole period, then the share of receptions with half or more of the
-  // path super-refractive or ducting (each comparison only when both
+  // path in the High band or stronger (each comparison only when both
   // values exist), the LoRa-duct count only when there is one, and the
   // pairs whose line of sight is not checked yet.
   function linksSummary(sum, days, method) {
@@ -927,7 +929,7 @@
       var e = frac(sum.recvEnhancedFrac), eb = frac(sum.baselineEnhancedFrac);
       var grad = g == null ? '' : 'Along their paths the modelled refractivity gradient averaged ' + fmtGrad(g) + ' when heard' +
         (gb == null ? '' : ', against ' + fmtGrad(gb) + ' for the same paths over the whole period');
-      var enh = e == null ? '' : 'half or more of the path was super-refractive or ducting for ' + pctOf(e) + ' of receptions' +
+      var enh = e == null ? '' : 'half or more of the path was in the High band or stronger for ' + pctOf(e) + ' of receptions' +
         (eb == null ? '' : ' vs ' + pctOf(eb) + ' overall');
       if (grad && enh) out.push(grad + '; ' + enh + '.');
       else if (grad) out.push(grad + '.');
@@ -963,20 +965,21 @@
 
   // One reception: time, how it was heard, SNR/RSSI when present (a relay
   // reception has none), the modelled path gradient and the share of the
-  // path that was super-refractive or ducting; the LoRa-duct share only
-  // when there is one.
+  // path in the High band or stronger, then (secondary) the class-based
+  // super-refractive share; the LoRa-duct share only when there is one.
   function recLine(r) {
     var parts = [fmtTime(Number(r.t))];
     if (typeof r.via === 'string' && Object.prototype.hasOwnProperty.call(VIA_TEXT, r.via)) parts.push(VIA_TEXT[r.via]);
     if (r.snr != null && isFinite(Number(r.snr))) parts.push('SNR ' + fmtNum(r.snr, 1) + ' dB');
     if (r.rssi != null && isFinite(Number(r.rssi))) parts.push('RSSI ' + fmtNum(r.rssi, 0) + ' dBm');
-    var g = num(r.meanGradNkm), sf = frac(r.superFrac), df = frac(r.ductFrac);
-    if (g == null && sf == null) {
+    var g = num(r.meanGradNkm), hf = frac(r.highFrac), sf = frac(r.superFrac), df = frac(r.ductFrac);
+    if (g == null && hf == null && sf == null) {
       parts.push('no model data for this time');
       return parts.join(' \u00b7 ');
     }
     if (g != null) parts.push('path gradient ' + fmtGrad(g));
-    if (sf != null) parts.push('super-refractive or ducting along ' + pctOf(sf) + ' of the path');
+    if (hf != null) parts.push('High band or stronger along ' + pctOf(hf) + ' of the path');
+    if (sf != null) parts.push('super-refractive along ' + pctOf(sf));
     if (df != null && df > 0) parts.push('LoRa duct along ' + pctOf(df));
     return parts.join(' \u00b7 ');
   }
@@ -1001,7 +1004,8 @@
     var count = int0(L0.count);
     if (count) box.appendChild(el('div', 'mc-duct-popup-note', 'Heard ' + plural(count, 'time') + ' in the period'));
     var f = Number(freqMHz);
-    box.appendChild(el('div', 'mc-duct-popup-note', 'Path gradient: the model\u2019s mean refractivity gradient along the line (more negative bends more). Shares are of the points along the line.' +
+    box.appendChild(el('div', 'mc-duct-popup-note', 'Path gradient: the model\u2019s mean refractivity gradient along the line (more negative bends more). High band: ' +
+      fmtGrad(STOP_N[4]) + ' or stronger, as in the legend. Shares are of the points along the line.' +
       (lora ? ' LoRa duct: a modelled duct that may carry ' + (f > 0 ? fmtMHz(f) : 'LoRa') + '.' : '')));
     return box;
   }
@@ -1455,8 +1459,8 @@
         this._linksToggle = tog;
         sec.appendChild(tog);
         var rows = this._linksOpen ? [
-          ['mc-duct-swatch-link-duct', 'Half or more of the path super-refractive or ducting (model)'],
-          ['mc-duct-swatch-link', 'Less of the path super-refractive or ducting'],
+          ['mc-duct-swatch-link-duct', 'Half or more of the path in the High band or stronger (model)'],
+          ['mc-duct-swatch-link', 'Less of the path in the High band'],
           ['mc-duct-swatch-link-nodata', 'Dashed: no model data for that time']
         ] : [];
         for (var i = 0; i < rows.length; i++) {

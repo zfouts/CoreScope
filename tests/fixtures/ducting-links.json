@@ -44,14 +44,16 @@
      "ductFrac": 0.8,
      "superFrac": 0.8,
      "via": "observer",
-     "meanGradNkm": -62.3
+     "meanGradNkm": -62.3,
+     "highFrac": 0.75
     },
     {
      "t": 1795026400,
      "via": "relay",
      "ductFrac": 0.1,
      "superFrac": 0.2,
-     "meanGradNkm": -45.6
+     "meanGradNkm": -45.6,
+     "highFrac": 0.1
     }
    ]
   },
@@ -80,8 +82,9 @@
      "t": 1795044600,
      "via": "relay",
      "ductFrac": 0,
-     "superFrac": 0.3,
-     "meanGradNkm": -47
+     "superFrac": 0.95,
+     "meanGradNkm": -47,
+     "highFrac": 0.2
     }
    ]
   },
@@ -112,7 +115,8 @@
      "ductFrac": -1,
      "superFrac": -1,
      "via": "observer",
-     "meanGradNkm": null
+     "meanGradNkm": null,
+     "highFrac": -1
     }
    ]
   },
@@ -142,7 +146,8 @@
      "ductFrac": 0,
      "superFrac": 0.9,
      "via": "observer",
-     "meanGradNkm": -70
+     "meanGradNkm": -70,
+     "highFrac": 0.9
     }
    ]
   }
