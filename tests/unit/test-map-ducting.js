@@ -1744,6 +1744,14 @@ const LEAD = 'Last 7 days: 1,234 receptions on 56 node pairs without terrain lin
 const GRAD = 'Along their paths the modelled refractivity gradient averaged −58 N/km when heard, against −49 N/km for the same paths over the whole period';
 const ENH = 'half or more of the path was super-refractive or ducting for 41% of receptions vs 22% overall';
 
+test('grid: losMethod is read from the summary (where the server sends it) or the top level', () => {
+  const { ctx } = makeGridSandbox();
+  assert.strictEqual(ctx.MC_ductLinksMethod({ summary: { losMethod: 'terrain' } }), 'terrain');
+  assert.strictEqual(ctx.MC_ductLinksMethod({ losMethod: 'smooth-earth', summary: {} }), 'smooth-earth');
+  assert.strictEqual(ctx.MC_ductLinksMethod({}), '');
+  assert.strictEqual(ctx.MC_ductLinksMethod(null), '');
+});
+
 test('grid: MC_ductLinksSummary leads with the gradient comparison; says only what the numbers say', () => {
   const { ctx } = makeGridSandbox();
   const f = (sum, days, m) => ctx.MC_ductLinksSummary(Object.assign({}, FULL, sum), days == null ? 7 : days, m == null ? 'terrain' : m);

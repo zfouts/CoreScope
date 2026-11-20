@@ -896,6 +896,13 @@
   // '-58 N/km' with a real minus sign.
   function fmtGrad(v) { return fmtSigned(Math.round(v)) + ' N/km'; }
 
+  // The server reports losMethod in the summary ("terrain" or
+  // "smooth-earth"); a top-level field is accepted too.
+  function linksMethod(ld) {
+    if (!ld) return '';
+    return String(ld.losMethod || (ld.summary && ld.summary.losMethod) || '');
+  }
+
   // What makes a pair count: no terrain line of sight (losMethod
   // "terrain"), else beyond the smooth-earth radio horizon.
   function losPhrase(method) { return method === 'terrain' ? 'without terrain line of sight' : 'beyond the radio horizon'; }
@@ -1458,7 +1465,7 @@
           r.appendChild(el('span', null, rows[i][1]));
           sec.appendChild(r);
         }
-        sec.appendChild(el('div', 'mc-duct-links-summary', linksSummary(ld.summary, ld.days, ld.losMethod)));
+        sec.appendChild(el('div', 'mc-duct-links-summary', linksSummary(ld.summary, ld.days, linksMethod(ld))));
         this._linkCountEl = el('div', 'mc-duct-legend-meta');
         this._linkCountEl.setAttribute('aria-live', 'polite');
         this._updateLinkCount();
@@ -2005,7 +2012,7 @@
         try {
           if (!this._linkPopup) this._linkPopup = L.popup({ maxWidth: 300 });
           this._linkPopupId = linkId(items[best].link);
-          this._linkPopup.setLatLng(latlng).setContent(linkPopupContent(items[best], this._links && this._links.freqMHz, this._links && this._links.losMethod)).openOn(map);
+          this._linkPopup.setLatLng(latlng).setContent(linkPopupContent(items[best], this._links && this._links.freqMHz, linksMethod(this._links))).openOn(map);
           return true;
         } catch (_) { return false; }
       },
@@ -2019,7 +2026,7 @@
         var items = this._shownLinks || [];
         for (var k = 0; k < items.length; k++) {
           if (linkId(items[k].link) === this._linkPopupId) {
-            p.setContent(linkPopupContent(items[k], this._links && this._links.freqMHz, this._links && this._links.losMethod));
+            p.setContent(linkPopupContent(items[k], this._links && this._links.freqMHz, linksMethod(this._links)));
             return;
           }
         }
@@ -2146,6 +2153,7 @@
   window.MC_ductLinksAt = linksAt;
   window.MC_ductLinkKind = linkKind;
   window.MC_ductSegDist = segDist;
+  window.MC_ductLinksMethod = linksMethod;
   window.MC_ductLinksSummary = linksSummary;
   window.MC_ductLinkPopup = linkPopupContent;
 })();
