@@ -151,6 +151,7 @@ type ductingGridStore interface {
 	UpsertDuctingGrid(model string, validTime, runTime int64, leadHours int, data []byte, createdAt int64) (bool, error)
 	LatestDuctingRun(model string) (int64, error)
 	DuctingRunLeads(model string, runTime int64) ([]int, error)
+	DuctingValidLeads(model string, from, to int64) (map[int64]int, error)
 	PruneDuctingGrid(model string, before int64) (int64, error)
 }
 
@@ -176,6 +177,11 @@ type ductingGridJob struct {
 	// the same results as ducting.Analyze(ducting.Profile(...)).
 	analyze func([]ducting.Level) ducting.Result
 	logf    func(format string, args ...any)
+
+	// missingCycles holds past cycles the bucket answered 404 for, with
+	// when (unix s): backfill skips them for ductingGridMissingRetry. Used
+	// only from the scheduler goroutine; bounded by forgetMissing.
+	missingCycles map[int64]int64
 }
 
 // newDuctingGridHTTPClient returns the job's client: 30 s per request and
@@ -307,35 +313,65 @@ func (j *ductingGridJob) steps() []int {
 
 func cycleStamp(run int64) string { return time.Unix(run, 0).UTC().Format("2006010215") }
 
-// runOnce finds the newest usable cycle, computes the steps of it not yet
-// stored, then prunes history.
+// runOnce is one tick: the steps of the newest usable cycle not yet stored,
+// then history gaps (backfill) with what is left of the download budget,
+// then pruning. Backfill and prune share one clock reading, so prune never
+// removes a step backfill just wrote.
 func (j *ductingGridJob) runOnce(ctx context.Context) {
-	start := j.now()
+	now := j.now().Unix()
 	latest, err := j.store.LatestDuctingRun(ductingGridModel)
 	if err != nil {
 		j.logf("[ducting-grid] reading the latest stored run: %v", err)
 		return
 	}
 	budget := &ductingGridBudget{limit: j.budget}
+	if j.runNewest(ctx, latest, budget) {
+		if latest, err = j.store.LatestDuctingRun(ductingGridModel); err != nil {
+			j.logf("[ducting-grid] reading the latest stored run: %v", err)
+		} else {
+			j.backfill(ctx, now, latest, budget)
+		}
+	}
+
+	cutoff := j.historyCutoff(now)
+	if n, err := j.store.PruneDuctingGrid(ductingGridModel, cutoff); err != nil {
+		j.logf("[ducting-grid] prune: %v", err)
+	} else if n > 0 {
+		j.logf("[ducting-grid] pruned %d steps older than %d days", n, j.historyDays)
+	}
+}
+
+// historyCutoff is the oldest valid time kept: now - historyDays.
+func (j *ductingGridJob) historyCutoff(now int64) int64 {
+	return now - int64(j.historyDays)*86400
+}
+
+// runNewest computes the steps of the newest usable cycle not yet stored.
+// false means the tick must end here (a panic, or the cycle context ended).
+func (j *ductingGridJob) runNewest(ctx context.Context, latest int64, budget *ductingGridBudget) bool {
+	start := j.now()
 	run, missing, ok := j.pickCycle(ctx, latest, budget)
 	if !ok {
-		return
+		return ctx.Err() == nil
 	}
 	stamp := cycleStamp(run)
 	total := len(j.steps())
 	written := 0
+	cont := true
 	for _, step := range missing {
 		if ctx.Err() != nil {
 			j.logf("[ducting-grid] run %s: stopped before step f%03d: %v", stamp, step, ctx.Err())
+			cont = false
 			break
 		}
-		data, err := j.buildStep(ctx, run, step, budget)
-		if err == nil {
-			_, err = j.store.UpsertDuctingGrid(ductingGridModel, run+int64(step)*3600, run, step, data, j.now().Unix())
-		}
+		err := j.writeStep(ctx, run, step, budget)
 		if err != nil {
 			j.logf("[ducting-grid] run %s step f%03d failed: %v", stamp, step, err)
-			if errors.Is(err, errDuctingGridPanic) || errors.Is(err, errDuctingGridBudget) || ctx.Err() != nil {
+			if errors.Is(err, errDuctingGridPanic) || ctx.Err() != nil {
+				cont = false
+				break
+			}
+			if errors.Is(err, errDuctingGridBudget) {
 				break
 			}
 			continue
@@ -344,12 +380,110 @@ func (j *ductingGridJob) runOnce(ctx context.Context) {
 	}
 	j.logf("[ducting-grid] run %s: %d/%d steps, %d MB, %s",
 		stamp, total-len(missing)+written, total, budget.used()/1e6, j.now().Sub(start).Round(time.Second))
+	return cont
+}
 
-	cutoff := j.now().Unix() - int64(j.historyDays)*86400
-	if n, err := j.store.PruneDuctingGrid(ductingGridModel, cutoff); err != nil {
-		j.logf("[ducting-grid] prune: %v", err)
-	} else if n > 0 {
-		j.logf("[ducting-grid] pruned %d steps older than %d days", n, j.historyDays)
+// writeStep builds one step of run and stores it.
+func (j *ductingGridJob) writeStep(ctx context.Context, run int64, step int, budget *ductingGridBudget) error {
+	data, err := j.buildStep(ctx, run, step, budget)
+	if err != nil {
+		return err
+	}
+	_, err = j.store.UpsertDuctingGrid(ductingGridModel, run+int64(step)*3600, run, step, data, j.now().Unix())
+	return err
+}
+
+// ductingGridBackfillLeads are the analysis steps backfill stores per past
+// cycle: f000 and f003 cover the cycle's 6 hours (valid C and C+3h).
+var ductingGridBackfillLeads = [...]int{0, 3}
+
+// ductingGridMissingRetry is how long a cycle the bucket does not have
+// (404 on its .idx) is left alone before backfill asks again.
+const ductingGridMissingRetry = 86400
+
+type ductingGridBackfillStep struct {
+	run  int64
+	lead int
+}
+
+// backfill fills history gaps: for every cycle C with
+// historyCutoff(now) <= C < latest, newest first, the steps f000 and f003
+// unless a row for that valid time with lead_hours <= 3 already exists. It
+// uses what the newest-run work left of the budget and the cycle context;
+// whatever is left over continues on the next tick.
+func (j *ductingGridJob) backfill(ctx context.Context, now, latest int64, budget *ductingGridBudget) {
+	if latest <= 0 {
+		return
+	}
+	cutoff := j.historyCutoff(now)
+	first := cutoff + (ductingGridCycleSeconds-cutoff%ductingGridCycleSeconds)%ductingGridCycleSeconds // first cycle >= cutoff
+	j.forgetMissing(now, first)
+	stored, err := j.store.DuctingValidLeads(ductingGridModel, cutoff, latest)
+	if err != nil {
+		j.logf("[ducting-grid] backfill: reading stored steps: %v", err)
+		return
+	}
+	var todo []ductingGridBackfillStep
+	for c := latest - ductingGridCycleSeconds; c >= first; c -= ductingGridCycleSeconds {
+		if _, skip := j.missingCycles[c]; skip {
+			continue
+		}
+		for _, lead := range ductingGridBackfillLeads {
+			if l, ok := stored[c+int64(lead)*3600]; ok && l <= ductingGridBackfillLeads[len(ductingGridBackfillLeads)-1] {
+				continue
+			}
+			todo = append(todo, ductingGridBackfillStep{c, lead})
+		}
+	}
+	if len(todo) == 0 {
+		return
+	}
+	used0 := budget.used()
+	written, gone := 0, 0
+	for i := 0; i < len(todo); i++ {
+		st := todo[i]
+		if ctx.Err() != nil {
+			break
+		}
+		if _, skip := j.missingCycles[st.run]; skip {
+			gone++ // the cycle's other step just came back 404
+			continue
+		}
+		err := j.writeStep(ctx, st.run, st.lead, budget)
+		if err == nil {
+			written++
+			continue
+		}
+		if errors.Is(err, errDuctingGridNotFound) {
+			j.rememberMissing(st.run, now)
+			gone++
+			continue
+		}
+		j.logf("[ducting-grid] backfill run %s step f%03d failed: %v", cycleStamp(st.run), st.lead, err)
+		if errors.Is(err, errDuctingGridPanic) || errors.Is(err, errDuctingGridBudget) || ctx.Err() != nil {
+			break
+		}
+	}
+	j.logf("[ducting-grid] backfill: %d steps written, %d remaining, %d MB",
+		written, len(todo)-written-gone, (budget.used()-used0)/1e6)
+}
+
+// rememberMissing records a cycle the bucket does not have.
+func (j *ductingGridJob) rememberMissing(run, now int64) {
+	if j.missingCycles == nil {
+		j.missingCycles = make(map[int64]int64)
+	}
+	j.missingCycles[run] = now
+}
+
+// forgetMissing drops entries older than ductingGridMissingRetry or
+// outside the history window, which bounds the set to the window's cycles
+// (historyDays*4 at most).
+func (j *ductingGridJob) forgetMissing(now, first int64) {
+	for c, at := range j.missingCycles {
+		if now-at >= ductingGridMissingRetry || c < first {
+			delete(j.missingCycles, c)
+		}
 	}
 }
 

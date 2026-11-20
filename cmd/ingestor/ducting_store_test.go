@@ -161,3 +161,23 @@ func TestDuctingGridRunLeads(t *testing.T) {
 		}
 	})
 }
+
+func TestDuctingGridValidLeads(t *testing.T) {
+	forEachDuctingBackend(t, func(t *testing.T, s *Store) {
+		for _, r := range []struct {
+			valid, run int64
+			lead       int
+		}{{100, 100, 0}, {103, 94, 9}, {106, 106, 0}, {99, 99, 0}} {
+			if _, err := s.UpsertDuctingGrid("gfs", r.valid, r.run, r.lead, []byte("x"), 1); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := s.UpsertDuctingGrid("icon", 101, 101, 0, []byte("x"), 1); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.DuctingValidLeads("gfs", 100, 106)
+		if err != nil || len(got) != 2 || got[100] != 0 || got[103] != 9 {
+			t.Fatalf("leads %v %v", got, err)
+		}
+	})
+}

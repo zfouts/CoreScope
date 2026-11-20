@@ -831,3 +831,183 @@ func BenchmarkDuctingGridStep(b *testing.B) {
 	}
 	b.ReportMetric(float64(size), "encoded-bytes")
 }
+
+// ---- backfill ----
+
+// backfillClock is 12Z on the run's day: the 12Z cycle is not published, so
+// the newest run is testGridRun (06Z). With historyDays 1 the window starts
+// exactly at the 12Z cycle of the day before, so the backfill cycles are
+// 00Z, 18Z (previous day) and 12Z (previous day, on the cutoff).
+func backfillClock() time.Time { return time.Unix(testGridRun, 0).Add(6 * time.Hour) }
+
+const h6 = int64(ductingGridCycleSeconds)
+
+// gridStepCost is the bytes one test step downloads (two .idx and 43
+// messages), and the cost of probing a run's last step (two .idx).
+func gridStepCost(t *testing.T, srv string, run int64) (step, probe int64) {
+	t.Helper()
+	j, _ := newTestGridJob(nil, srv, backfillClock())
+	b := &ductingGridBudget{limit: 1 << 30}
+	if _, err := j.buildStep(context.Background(), run, 0, b); err != nil {
+		t.Fatal(err)
+	}
+	step = b.used()
+	b = &ductingGridBudget{limit: 1 << 30}
+	for file := range gfsFileKinds {
+		if _, err := j.fetchIndex(context.Background(), run, 3, file, b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return step, b.used()
+}
+
+func storedRow(t *testing.T, s *Store, valid int64) (run int64, lead int, data []byte, ok bool) {
+	t.Helper()
+	run, lead, data, _, ok = ductingRow(t, s, ductingGridModel, valid)
+	return run, lead, data, ok
+}
+
+func TestDuctingGridBackfillNewestFirstAcrossTicks(t *testing.T) {
+	noaa, srv := newFakeNOAA(t)
+	for k := int64(0); k <= 3; k++ {
+		noaa.publishRun(testGridRun - k*h6)
+	}
+	store := openGridTestStore(t)
+	step, probe := gridStepCost(t, srv.URL, testGridRun-h6)
+
+	j, logs := newTestGridJob(store, srv.URL, backfillClock())
+	j.historyDays = 1
+	// Newest run (12Z probe 404 is free, 06Z probe, 2 steps), then room
+	// for 2.5 backfill steps: the third stops on the budget.
+	j.budget = probe + 2*step + 5*step/2
+	j.runCycle(context.Background())
+	if !leadsEqual(storedLeads(t, store, testGridRun), 0, 3) {
+		t.Fatalf("newest run not stored:\n%s", logs)
+	}
+	if !leadsEqual(storedLeads(t, store, testGridRun-h6), 0, 3) {
+		t.Fatalf("newest gap (00Z) not filled first:\n%s", logs)
+	}
+	if l := storedLeads(t, store, testGridRun-2*h6); len(l) != 0 {
+		t.Fatalf("18Z filled despite the budget: %v", l)
+	}
+	if !logs.contains("[ducting-grid] backfill: 2 steps written, 4 remaining") || !logs.contains("download budget exceeded") {
+		t.Fatalf("logs:\n%s", logs)
+	}
+
+	// Next tick resumes where it stopped; prune (same window) keeps it all,
+	// including the 12Z cycle exactly on the cutoff.
+	j.runCycle(context.Background())
+	for k := int64(1); k <= 3; k++ {
+		if !leadsEqual(storedLeads(t, store, testGridRun-k*h6), 0, 3) {
+			t.Fatalf("cycle -%d h not filled:\n%s", 6*k, logs)
+		}
+	}
+	if !logs.contains("[ducting-grid] backfill: 4 steps written, 0 remaining") {
+		t.Fatalf("logs:\n%s", logs)
+	}
+	// Nothing left: the third tick downloads nothing.
+	before := noaa.totalCount("/gfs.")
+	j.runCycle(context.Background())
+	// Only the 12Z probe (404 on the first file) goes out.
+	if got := noaa.totalCount("/gfs."); got != before+1 {
+		t.Fatalf("complete history fetched again: %d requests, was %d", got, before)
+	}
+	// Rows older than the window are not backfilled.
+	if l := storedLeads(t, store, testGridRun-4*h6); len(l) != 0 {
+		t.Fatalf("cycle before the window filled: %v", l)
+	}
+}
+
+func TestDuctingGridBackfillSkipsAnalysisRowsReplacesForecasts(t *testing.T) {
+	noaa, srv := newFakeNOAA(t)
+	for k := int64(0); k <= 3; k++ {
+		noaa.publishRun(testGridRun - k*h6)
+	}
+	store := openGridTestStore(t)
+	c := testGridRun - h6 // 00Z
+	// 00Z f000 already stored (lead 0): kept. 00Z+3h holds an older
+	// forecast (lead 9 of 18Z the day before): replaced by 00Z f003.
+	if _, err := store.UpsertDuctingGrid(ductingGridModel, c, c, 0, []byte("keep"), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertDuctingGrid(ductingGridModel, c+3*3600, c-h6, 9, []byte("old"), 1); err != nil {
+		t.Fatal(err)
+	}
+	// 18Z: f003 stored as lead 3 of its own run, f000 stored as lead 3 of
+	// 12Z: both count as analysis, nothing to fetch.
+	c18 := testGridRun - 2*h6
+	if _, err := store.UpsertDuctingGrid(ductingGridModel, c18, c18-3*3600, 3, []byte("a3"), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertDuctingGrid(ductingGridModel, c18+3*3600, c18, 3, []byte("b3"), 1); err != nil {
+		t.Fatal(err)
+	}
+	j, logs := newTestGridJob(store, srv.URL, backfillClock())
+	j.historyDays = 1
+	j.runCycle(context.Background())
+
+	if _, _, data, _ := storedRow(t, store, c); string(data) != "keep" {
+		t.Fatalf("existing analysis row replaced")
+	}
+	if run, lead, data, _ := storedRow(t, store, c+3*3600); run != c || lead != 3 || string(data) == "old" {
+		t.Fatalf("older forecast not replaced: run %d lead %d", run, lead)
+	}
+	if noaa.count(gridPath(c, 0, gfsFilePgrb2, true)) != 0 || noaa.count(gridPath(c18, 0, gfsFilePgrb2, true)) != 0 ||
+		noaa.count(gridPath(c18, 3, gfsFilePgrb2, true)) != 0 {
+		t.Fatalf("stored analysis steps fetched again")
+	}
+	if !leadsEqual(storedLeads(t, store, testGridRun-3*h6), 0, 3) {
+		t.Fatalf("12Z not filled:\n%s", logs)
+	}
+	if !logs.contains("[ducting-grid] backfill: 3 steps written, 0 remaining") {
+		t.Fatalf("logs:\n%s", logs)
+	}
+}
+
+func TestDuctingGridBackfillMissingCycleRemembered(t *testing.T) {
+	noaa, srv := newFakeNOAA(t)
+	noaa.publishRun(testGridRun)
+	noaa.publishRun(testGridRun - 2*h6) // 00Z is not in the bucket
+	store := openGridTestStore(t)
+	now := backfillClock()
+	j, logs := newTestGridJob(store, srv.URL, now)
+	j.historyDays = 2
+	missingIdx := gridPath(testGridRun-h6, 0, gfsFilePgrb2, true)
+
+	j.runCycle(context.Background())
+	if noaa.count(missingIdx) != 1 || noaa.count(gridPath(testGridRun-h6, 3, gfsFilePgrb2, true)) != 0 {
+		t.Fatalf("missing cycle probed %d times / f003 tried", noaa.count(missingIdx))
+	}
+	if !leadsEqual(storedLeads(t, store, testGridRun-2*h6), 0, 3) {
+		t.Fatalf("older cycle behind the gap not filled:\n%s", logs)
+	}
+	if logs.contains("backfill run 2026112000") {
+		t.Fatalf("a 404 is not a failure:\n%s", logs)
+	}
+
+	// Same day: not asked again.
+	j.now = func() time.Time { return now.Add(12 * time.Hour) }
+	j.runCycle(context.Background())
+	if noaa.count(missingIdx) != 1 {
+		t.Fatalf("missing cycle asked again within a day")
+	}
+	// A day later it is.
+	j.now = func() time.Time { return now.Add(25 * time.Hour) }
+	j.runCycle(context.Background())
+	if noaa.count(missingIdx) != 2 {
+		t.Fatalf("missing cycle not retried after a day: %d", noaa.count(missingIdx))
+	}
+	if len(j.missingCycles) > j.historyDays*4 {
+		t.Fatalf("missing set unbounded: %d", len(j.missingCycles))
+	}
+}
+
+func TestDuctingGridBackfillNothingStored(t *testing.T) {
+	_, srv := newFakeNOAA(t)
+	store := openGridTestStore(t)
+	j, logs := newTestGridJob(store, srv.URL, backfillClock())
+	j.runCycle(context.Background())
+	if logs.contains("backfill") {
+		t.Fatalf("backfill without a newest run:\n%s", logs)
+	}
+}

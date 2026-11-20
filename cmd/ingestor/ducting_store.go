@@ -72,6 +72,29 @@ func (s *Store) DuctingRunLeads(model string, runTime int64) ([]int, error) {
 	return leads, err
 }
 
+// DuctingValidLeads returns lead_hours by valid_time for the model's rows
+// with from <= valid_time < to.
+func (s *Store) DuctingValidLeads(model string, from, to int64) (map[int64]int, error) {
+	out := make(map[int64]int)
+	err := s.WriterTx("ducting_grid_valid_leads", func(tx *sql.Tx) error {
+		rows, err := tx.Query(`SELECT valid_time, lead_hours FROM ducting_grid WHERE model = ? AND valid_time >= ? AND valid_time < ?`, model, from, to)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var v int64
+			var l int
+			if err := rows.Scan(&v, &l); err != nil {
+				return err
+			}
+			out[v] = l
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
 // PruneDuctingGrid deletes the model's steps with valid_time < before and
 // returns how many rows went.
 func (s *Store) PruneDuctingGrid(model string, before int64) (int64, error) {
