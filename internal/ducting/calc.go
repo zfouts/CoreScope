@@ -1,7 +1,7 @@
-package main
+package ducting
 
-// Tropospheric ducting physics: one vertical profile in, one DuctResult out.
-// Pure functions, no I/O. Formulas and limits are in ducting_types.go.
+// Tropospheric ducting physics: one vertical profile in, one Result out.
+// Pure functions, no I/O. Formulas and limits are in the package doc and types.go.
 
 import (
 	"math"
@@ -27,18 +27,19 @@ func ModifiedRefractivity(n, hAGL float64) float64 {
 	return n + 0.157*hAGL
 }
 
-func ductFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+// finite reports whether v is neither NaN nor infinite.
+func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
-// ductSaneLevel reports whether p, t and rh are finite and inside the
+// saneLevel reports whether p, t and rh are finite and inside the
 // accepted physical ranges (RH is clamped later, so only finiteness matters).
-func ductSaneLevel(pHPa, tC, rhPct float64) bool {
-	return ductFinite(pHPa) && ductFinite(tC) && ductFinite(rhPct) &&
+func saneLevel(pHPa, tC, rhPct float64) bool {
+	return finite(pHPa) && finite(tC) && finite(rhPct) &&
 		pHPa >= 100 && pHPa <= 1100 && tC >= -90 && tC <= 60
 }
 
-// ductShortest returns the smallest of the given lengths. (The package's
+// shortest returns the smallest of the given lengths. (The package's
 // test files shadow the builtin min, so it is not used here.)
-func ductShortest(lens ...int) int {
+func shortest(lens ...int) int {
 	s := lens[0]
 	for _, l := range lens[1:] {
 		if l < s {
@@ -48,45 +49,46 @@ func ductShortest(lens ...int) int {
 	return s
 }
 
-func ductClampRH(rh float64) float64 {
+// clampRH limits a relative humidity to 0..100.
+func clampRH(rh float64) float64 {
 	return math.Min(100, math.Max(0, rh))
 }
 
-// DuctProfile builds the ascending profile from a surface point (2 m values)
+// Profile builds the ascending profile from a surface point (2 m values)
 // and pressure-level data. Slices may differ in length (the shortest wins)
 // and may hold NaN for missing values; unusable levels are skipped. Levels at
-// or below ground, at or below the surface point, or above ductMaxHeightAGL
+// or below ground, at or below the surface point, or above MaxHeightAGL
 // are dropped. When surfPHPa is not finite the pressure-below-ground check is
 // skipped and only the height check applies.
-func DuctProfile(elevation, surfPHPa, t2mC, rh2mPct float64, levelsHPa, tempsC, rhsPct, geoHeightsM []float64) []DuctLevel {
-	n := ductShortest(len(levelsHPa), len(tempsC), len(rhsPct), len(geoHeightsM))
-	out := make([]DuctLevel, 0, n+1)
-	if ductSaneLevel(surfPHPa, t2mC, rh2mPct) {
-		out = append(out, DuctLevel{
-			HeightAGL:   ductSurfaceHeightM,
+func Profile(elevation, surfPHPa, t2mC, rh2mPct float64, levelsHPa, tempsC, rhsPct, geoHeightsM []float64) []Level {
+	n := shortest(len(levelsHPa), len(tempsC), len(rhsPct), len(geoHeightsM))
+	out := make([]Level, 0, n+1)
+	if saneLevel(surfPHPa, t2mC, rh2mPct) {
+		out = append(out, Level{
+			HeightAGL:   SurfaceHeightM,
 			PressureHPa: surfPHPa,
 			TempC:       t2mC,
-			RHPct:       ductClampRH(rh2mPct),
+			RHPct:       clampRH(rh2mPct),
 		})
 	}
-	surfOK := ductFinite(surfPHPa)
+	surfOK := finite(surfPHPa)
 	for i := 0; i < n; i++ {
 		p, t, rh, z := levelsHPa[i], tempsC[i], rhsPct[i], geoHeightsM[i]
-		if !ductSaneLevel(p, t, rh) || !ductFinite(z) || !ductFinite(elevation) {
+		if !saneLevel(p, t, rh) || !finite(z) || !finite(elevation) {
 			continue
 		}
 		if surfOK && p >= surfPHPa {
 			continue
 		}
 		h := z - elevation
-		if h <= ductSurfaceHeightM || h > ductMaxHeightAGL {
+		if h <= SurfaceHeightM || h > MaxHeightAGL {
 			continue
 		}
-		out = append(out, DuctLevel{HeightAGL: h, PressureHPa: p, TempC: t, RHPct: ductClampRH(rh)})
+		out = append(out, Level{HeightAGL: h, PressureHPa: p, TempC: t, RHPct: clampRH(rh)})
 	}
 	// Stable so that, among equal heights, the surface point (appended first)
 	// is the one kept by the de-duplication below.
-	slices.SortStableFunc(out, func(a, b DuctLevel) int {
+	slices.SortStableFunc(out, func(a, b Level) int {
 		switch {
 		case a.HeightAGL < b.HeightAGL:
 			return -1
@@ -105,9 +107,9 @@ func DuctProfile(elevation, surfPHPa, t2mC, rh2mPct float64, levelsHPa, tempsC, 
 	return dedup
 }
 
-// AnalyzeDucting computes N and M for each level of an ascending profile and
+// Analyze computes N and M for each level of an ascending profile and
 // classifies it (see analyzeM).
-func AnalyzeDucting(profile []DuctLevel) DuctResult {
+func Analyze(profile []Level) Result {
 	h := make([]float64, len(profile))
 	m := make([]float64, len(profile))
 	n := make([]float64, len(profile))
@@ -119,31 +121,31 @@ func AnalyzeDucting(profile []DuctLevel) DuctResult {
 	return analyzeM(h, m, n)
 }
 
-// ductMeanMinLayerM is the shallowest layer ductMeanGradient still averages
-// over when the profile stops below ductMeanLayerM (high terrain: the models'
+// meanMinLayerM is the shallowest layer meanGradient still averages
+// over when the profile stops below MeanLayerM (high terrain: the models'
 // top level, 700 hPa, is only ~1.4 km above Denver).
-const ductMeanMinLayerM = 1000.0
+const meanMinLayerM = 1000.0
 
-// ductMeanGradient returns (N at ductMeanLayerM - N at the first point) /
-// ductMeanLayerM in N/km, with N at ductMeanLayerM linearly interpolated
+// meanGradient returns (N at MeanLayerM - N at the first point) /
+// MeanLayerM in N/km, with N at MeanLayerM linearly interpolated
 // between the two points that bracket it. When none do but the highest point
-// is at least ductMeanMinLayerM above ground, it returns the mean over that
+// is at least meanMinLayerM above ground, it returns the mean over that
 // shallower depth instead: (N at the top - N at the first point) / its
 // height. 0 when the profile is shallower still. h ascends; h[0] is the 2 m
 // surface point.
-func ductMeanGradient(h, n []float64) float64 {
+func meanGradient(h, n []float64) float64 {
 	top := -1
 	for i := 0; i+1 < len(h); i++ {
 		if top < 0 || h[i+1] > h[top] {
 			top = i + 1
 		}
-		if h[i] > ductMeanLayerM || h[i+1] < ductMeanLayerM || h[i+1] <= h[i] {
+		if h[i] > MeanLayerM || h[i+1] < MeanLayerM || h[i+1] <= h[i] {
 			continue
 		}
-		n1500 := n[i] + (n[i+1]-n[i])*(ductMeanLayerM-h[i])/(h[i+1]-h[i])
-		return (n1500 - n[0]) / ductMeanLayerM * 1000
+		n1500 := n[i] + (n[i+1]-n[i])*(MeanLayerM-h[i])/(h[i+1]-h[i])
+		return (n1500 - n[0]) / MeanLayerM * 1000
 	}
-	if top < 0 || h[top] < ductMeanMinLayerM {
+	if top < 0 || h[top] < meanMinLayerM {
 		return 0
 	}
 	return (n[top] - n[0]) / h[top] * 1000
@@ -151,13 +153,13 @@ func ductMeanGradient(h, n []float64) float64 {
 
 // analyzeM finds trapping layers in an M profile (heights ascending) and
 // returns the strongest duct (lowest fmin) plus the most negative dN/dh.
-func analyzeM(h, m, n []float64) DuctResult {
-	cnt := ductShortest(len(h), len(m), len(n))
+func analyzeM(h, m, n []float64) Result {
+	cnt := shortest(len(h), len(m), len(n))
 	if cnt < 2 {
-		return DuctResult{Class: DuctClassNoData}
+		return Result{Class: ClassNoData}
 	}
 
-	var res DuctResult
+	var res Result
 	haveGrad := false
 	for i := 0; i+1 < cnt; i++ {
 		dh := h[i+1] - h[i]
@@ -171,7 +173,7 @@ func analyzeM(h, m, n []float64) DuctResult {
 		}
 	}
 
-	res.MeanGradNkm = ductMeanGradient(h[:cnt], n[:cnt])
+	res.MeanGradNkm = meanGradient(h[:cnt], n[:cnt])
 
 	found, surface := false, false
 	var bestF, bestBase, bestTop, bestDM float64
@@ -205,8 +207,8 @@ func analyzeM(h, m, n []float64) DuctResult {
 		}
 		d, dm := top-base, mMax-mTop
 		if d > 0 && dm > 0 {
-			// One constant for surface and elevated ducts: see ductFminConstMHz.
-			f := ductFminConstMHz / (d * math.Sqrt(dm))
+			// One constant for surface and elevated ducts: see FminConstMHz.
+			f := FminConstMHz / (d * math.Sqrt(dm))
 			if !found || f < bestF || (f == bestF && base < bestBase) {
 				found, surface = true, j < 0
 				bestF, bestBase, bestTop, bestDM = f, base, top, dm
@@ -217,13 +219,13 @@ func analyzeM(h, m, n []float64) DuctResult {
 
 	switch {
 	case found && surface:
-		res.Class = DuctClassSurface
+		res.Class = ClassSurface
 	case found:
-		res.Class = DuctClassElev
-	case haveGrad && res.MinGradNkm <= ductSuperGradientNk:
-		res.Class = DuctClassSuper
+		res.Class = ClassElev
+	case haveGrad && res.MinGradNkm <= SuperGradientNk:
+		res.Class = ClassSuper
 	default:
-		res.Class = DuctClassNormal
+		res.Class = ClassNormal
 	}
 	if found {
 		res.FminMHz, res.BaseM, res.TopM, res.DeltaM = bestF, bestBase, bestTop, bestDM

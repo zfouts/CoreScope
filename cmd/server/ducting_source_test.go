@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/meshcore-analyzer/ducting"
 )
 
 // fakeOpenMeteo answers /v1/forecast like Open-Meteo: one object per
@@ -289,7 +291,7 @@ func TestDuctingSourceSingleObjectAndNulls(t *testing.T) {
 		t.Errorf("level arrays %d/%d, want %d", len(c.Hours[0].Temp), len(c.Hours[0].Geo), len(m.LevelsHPa))
 	}
 	// All-null levels are skipped by the physics: no usable profile.
-	r := AnalyzeDucting(DuctProfile(c.Elevation, c.Hours[2].SurfP, c.Hours[2].T2m, c.Hours[2].RH2m,
+	r := ducting.Analyze(ducting.Profile(c.Elevation, c.Hours[2].SurfP, c.Hours[2].T2m, c.Hours[2].RH2m,
 		m.LevelsHPa, c.Hours[2].Temp, c.Hours[2].RH, c.Hours[2].Geo))
 	if r.Class != DuctClassNoData {
 		t.Errorf("all-null hour class %d, want no data", r.Class)

@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/meshcore-analyzer/ducting"
 )
 
 // ductingInversion fills every hour with a surface-based duct: humid 2 m
@@ -672,8 +674,8 @@ func TestDuctingAnalyzeColumnMeanGradient(t *testing.T) {
 	if len(cell.N) != 2 {
 		t.Fatalf("len(n) = %d, want 2", len(cell.N))
 	}
-	n0 := Refractivity(1013, 15, 50)
-	n850 := Refractivity(850, 5, 60) // at 1500 m AGL exactly
+	n0 := ducting.Refractivity(1013, 15, 50)
+	n850 := ducting.Refractivity(850, 5, 60) // at 1500 m AGL exactly
 	if want := int(math.Round((n850 - n0) / 1.5)); cell.N[0] != want || cell.N[1] != want || want == 0 {
 		t.Errorf("n %v, want %d", cell.N, want)
 	}

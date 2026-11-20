@@ -19,6 +19,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/meshcore-analyzer/ducting"
 )
 
 const (
@@ -257,7 +259,7 @@ func (s *ductingService) inCoverage(cells [][2]float64) [][2]float64 {
 }
 
 func ductingRound(v float64) int {
-	if !ductFinite(v) {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
 		return 0
 	}
 	return int(math.Round(v))
@@ -271,7 +273,7 @@ func (s *ductingService) analyzeColumn(col ductingColumn) DuctingCell {
 		T: make([]int, n), DM: make([]int, n), G: make([]int, n), N: make([]int, n),
 	}
 	for i, h := range col.Hours {
-		r := AnalyzeDucting(DuctProfile(col.Elevation, h.SurfP, h.T2m, h.RH2m,
+		r := ducting.Analyze(ducting.Profile(col.Elevation, h.SurfP, h.T2m, h.RH2m,
 			s.model.LevelsHPa, h.Temp, h.RH, h.Geo))
 		cell.C[i] = int(r.Class)
 		cell.F[i] = ductingRound(r.FminMHz)
