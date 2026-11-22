@@ -96,7 +96,7 @@ async function setOverlayUi(page, on) {
 // What the page shows right now, for every live map: the cells the ducting
 // layers hold, the LoRa outline layers (cells, style), edge lines, field
 // images, any interactive layer of the overlay (there must be none), and
-// the legend/time boxes.
+// the panel with its legend/time sections.
 function inPageState() {
   const maps = ((window.__mcHarness && window.__mcHarness.maps) || [])
     .filter(m => m && m._container && m._container.isConnected && m._loaded);
@@ -123,6 +123,7 @@ function inPageState() {
     interactive,
     fields,
     edges,
+    panels: q('.mc-duct-panel').length,
     legends: q('.mc-duct-legend').length,
     times: q('.mc-duct-time').length,
     legendVisible: q('.mc-duct-legend').some(vis),
@@ -140,13 +141,13 @@ async function waitCells(page, min) {
   }, min || 1, { timeout: 25000, polling: 100 });
 }
 
-// Bounding boxes of the controls that must not overlap the legend / time box.
+// Bounding boxes of the controls that must not overlap the ducting panel.
 function inPageOverlaps() {
   const boxes = (el) => { const r = el.getBoundingClientRect(); return { l: r.left, t: r.top, r: r.right, b: r.bottom, w: r.width, h: r.height }; };
   const visible = (el) => { const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'; };
-  const mine = Array.prototype.slice.call(document.querySelectorAll('.mc-duct-legend, .mc-duct-time')).filter(visible);
+  const mine = Array.prototype.slice.call(document.querySelectorAll('.mc-duct-panel')).filter(visible);
   const others = Array.prototype.slice.call(document.querySelectorAll('.leaflet-control, #mapControls, #mapControlsToggle'))
-    .filter(el => visible(el) && !el.matches('.mc-duct-legend, .mc-duct-time') && !mine.some(m => m.contains(el) || el.contains(m)));
+    .filter(el => visible(el) && !el.matches('.mc-duct-panel') && !mine.some(m => m.contains(el) || el.contains(m)));
   const hits = [];
   mine.forEach((m, i) => {
     const a = boxes(m);
@@ -165,7 +166,9 @@ function inPageOverlaps() {
     const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
     if (a.l < -1 || a.t < -1 || a.r > vw + 1 || a.b > vh + 1) hits.push(`${name(m)} outside the viewport (${Math.round(a.l)},${Math.round(a.t)},${Math.round(a.r)},${Math.round(a.b)} in ${vw}x${vh})`);
   });
-  return { hits, mine: mine.length };
+  // The panel's own sections: the legend body and the timeline inside it.
+  const inside = mine.map(m => ['.mc-duct-legend', '.mc-duct-time'].filter(sel => { const e = m.querySelector(sel); return e && visible(e); }).length);
+  return { hits, mine: mine.length, inside };
 }
 
 function cssVars(page) {
@@ -309,7 +312,7 @@ function inPagePoint(a) {
   const r = m.getContainer().getBoundingClientRect();
   const x = r.left + p.x, y = r.top + p.y;
   const el = document.elementFromPoint(x, y);
-  const blocked = !el || !!el.closest('.leaflet-marker-icon, .leaflet-interactive, .leaflet-control, .leaflet-popup, #mapControls, .mc-duct-legend, .mc-duct-time, .leaflet-marker-pane, .leaflet-tooltip')
+  const blocked = !el || !!el.closest('.leaflet-marker-icon, .leaflet-interactive, .leaflet-control, .leaflet-popup, #mapControls, .mc-duct-panel, .leaflet-marker-pane, .leaflet-tooltip')
     || x < r.left + 40 || y < r.top + 40 || x > r.right - 40 || y > r.bottom - 40;
   return { x, y, blocked };
 }
@@ -332,18 +335,81 @@ async function pointsIn(page, c, step, max) {
   return out;
 }
 
-async function setSlider(page, idx) {
-  await page.evaluate((i) => {
-    const s = document.querySelector('.mc-duct-time input[type=range]');
-    s.value = String(i);
-    s.dispatchEvent(new Event('input', { bubbles: true }));
-  }, idx);
+// The timeline (a role=slider strip): the shown index, and moving it with
+// the keyboard as a user does (ArrowLeft / ArrowRight from where it is;
+// Home / End when that is shorter).
+const timeIdx = (page) => page.evaluate(() => parseInt(document.querySelector('.mc-duct-timeline').getAttribute('aria-valuenow'), 10));
+async function setTime(page, idx) {
+  const tl = page.locator('.mc-duct-timeline').first();
+  await tl.focus();
+  let cur = await timeIdx(page);
+  const max = await page.evaluate(() => parseInt(document.querySelector('.mc-duct-timeline').getAttribute('aria-valuemax'), 10));
+  if (idx < Math.abs(idx - cur)) { await page.keyboard.press('Home'); cur = 0; }
+  else if (max - idx < Math.abs(idx - cur)) { await page.keyboard.press('End'); cur = max; }
+  for (let k = 0; k < Math.abs(idx - cur); k++) await page.keyboard.press(idx > cur ? 'ArrowRight' : 'ArrowLeft');
+  await page.waitForFunction((i) => document.querySelector('.mc-duct-timeline').getAttribute('aria-valuenow') === String(i), idx, { timeout: 5000 });
 }
+// The first live map's view, the ducting layer's strip state (times and the
+// shown index of either source: _tlTimes / _tlIndex).
+function inPageView() {
+  const m = window.__mcHarness.maps.filter(x => x._container && x._container.isConnected && x._loaded)[0];
+  const c = m.getCenter();
+  let layer = null;
+  m.eachLayer((l) => { if (l._mcDuct) layer = l; });
+  const tl = document.querySelector('.mc-duct-timeline');
+  const o = m.getPixelOrigin(), pp = m._getMapPanePos();
+  return {
+    lat: c.lat, lng: c.lng, zoom: m.getZoom(), px: o.x - pp.x, py: o.y - pp.y,
+    idx: tl ? parseInt(tl.getAttribute('aria-valuenow'), 10) : -1,
+    scrollLeft: tl ? tl.scrollLeft : null,
+    xs: layer && layer._tlLayout ? layer._tlLayout.xs : [],
+    times: layer ? layer._tlTimes() : [],
+  };
+}
+// Waits until the strip has settled: the shown time sits under the centre.
+async function settled(page) {
+  await page.waitForFunction(() => {
+    const m = window.__mcHarness.maps.filter(x => x._container && x._container.isConnected && x._loaded)[0];
+    let layer = null;
+    m.eachLayer((l) => { if (l._mcDuct) layer = l; });
+    const tl = document.querySelector('.mc-duct-timeline');
+    if (!layer || !layer._tlLayout || !tl) return false;
+    // Also wait for the overlay's own scroll to be over (_tlTarget cleared,
+    // a frame after the strip arrives): a scrollLeft set by a test carries no
+    // wheel/touch/pointer event, so inside that frame it is indistinguishable
+    // from the end of the code's scroll and is ignored.
+    return layer._tlTarget == null && Math.abs(tl.scrollLeft - layer._tlLayout.xs[layer._tlIndex()]) <= 1;
+  }, null, { timeout: 4000, polling: 50 }).catch(() => {});
+  return page.evaluate(inPageView);
+}
+// Same view: same zoom and the same pixel at the top left (getCenter() may
+// round differently once the map has been touched, without any move).
+const sameView = (a, b) => a.zoom === b.zoom && Math.abs(a.px - b.px) < 0.5 && Math.abs(a.py - b.py) < 0.5;
+// The panel's box, where it lives, and its stored state.
+function inPagePanel() {
+  const p = document.querySelector('.mc-duct-panel');
+  if (!p) return null;
+  const r = p.getBoundingClientRect();
+  const vis = (sel) => { const e = p.querySelector(sel); if (!e) return false; const b = e.getBoundingClientRect(); return b.width > 0 && b.height > 0 && getComputedStyle(e).display !== 'none'; };
+  let stored = null;
+  try { stored = JSON.parse(localStorage.getItem('mc-duct-panel')); } catch (_) {}
+  return {
+    l: r.left, t: r.top, w: r.width, h: r.height,
+    floating: p.classList.contains('mc-duct-panel-floating'),
+    inCorner: !!p.closest('.leaflet-bottom.leaflet-left'),
+    inMap: p.parentNode && p.parentNode.classList.contains('leaflet-container'),
+    legend: vis('.mc-duct-legend'), time: vis('.mc-duct-time'), reset: vis('.mc-duct-reset'),
+    expanded: p.querySelector('.mc-duct-collapse').getAttribute('aria-expanded'),
+    stored,
+  };
+}
+const panelState = (page) => page.evaluate(inPagePanel);
 
 module.exports = {
   loraFreqsOf, sig2, shownFmin, fmtFreq, STOP_N, fieldN, stopBetween,
   assert, sleep, createRunner,
   IGNORED_CONSOLE, newPage, gotoRoute, openPicker, setOverlayUi,
   inPageState, pageState, waitCells, inPageOverlaps, cssVars, inPageFieldProbe,
-  neighbours, ringFactor, fieldProblems, outlineProblems, inPagePoint, pointsIn, setSlider,
+  neighbours, ringFactor, fieldProblems, outlineProblems, inPagePoint, pointsIn,
+  timeIdx, setTime, inPageView, settled, sameView, inPagePanel, panelState,
 };
