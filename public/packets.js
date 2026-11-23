@@ -3853,13 +3853,7 @@
         <button class="replay-live-btn" title="Replay this packet on the live map"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-play"/></svg> Replay</button>
       </div>
 
-      ${(hasRawHex || Object.keys(decoded).length) ? `<details class="detail-technical"${(typeof window !== 'undefined' && window.innerWidth > 480) ? ' open' : ''}>
-        <summary>Show raw bytes</summary>
-        ${hasRawHex ? `<div class="hex-legend">${buildHexLegend(ranges)}</div>
-        <div class="hex-dump">${createColoredHexDump(effectivePkt.raw_hex || pkt.raw_hex, ranges)}</div>` : ''}
-
-        ${hasRawHex ? buildFieldTable(effectivePkt.raw_hex ? effectivePkt : pkt, decoded, pathHops, ranges, pathEntries) : buildDecodedTable(decoded)}
-      </details>` : ''}
+      ${rawBytesHtml(effectivePkt, pkt, decoded, ranges, pathHops, pathEntries)}
 
       ${observations.length > 1 ? `
       <div class="detail-observations" style="margin-top:16px">
@@ -4033,6 +4027,32 @@
       rows += `<tr><td style="font-weight:600;padding:4px 8px">${escapeHtml(k)}</td><td style="padding:4px 8px">${escapeHtml(String(v))}</td></tr>`;
     }
     return rows ? `<table class="detail-decoded" style="width:100%;border-collapse:collapse;margin-top:8px">${rows}</table>` : '';
+  }
+
+  // Raw-bytes section of the detail pane. An ADVERT with a location is served
+  // without raw_hex when location privacy is on (location_hidden): say so
+  // instead of showing an empty hex view. Never assumes raw_hex is a string.
+  function rawBytesHtml(effectivePkt, pkt, decoded, ranges, pathHops, pathEntries) {
+    const eff = effectivePkt || pkt || {};
+    const hasRawHex = !!(eff.raw_hex || (pkt && pkt.raw_hex));
+    const LP = window.LocationPrivacy;
+    const hidden = !hasRawHex && !!LP && (LP.rawHexHidden(eff) || LP.rawHexHidden(pkt));
+    const hasDecoded = Object.keys(decoded || {}).length > 0;
+    if (!hasRawHex && !hasDecoded && !hidden) return '';
+    const open = (typeof window !== 'undefined' && window.innerWidth > 480) ? ' open' : '';
+    const summary = hidden ? '<summary>Show decoded fields</summary>' : '<summary>Show raw bytes</summary>';
+    const body = hasRawHex
+      ? `<div class="hex-legend">${buildHexLegend(ranges)}</div>
+        <div class="hex-dump">${createColoredHexDump(eff.raw_hex || pkt.raw_hex, ranges)}</div>
+
+        ${buildFieldTable(eff.raw_hex ? eff : pkt, decoded, pathHops, ranges, pathEntries)}`
+      : buildDecodedTable(decoded);
+    const details = (hasRawHex || hasDecoded)
+      ? `<details class="detail-technical"${open}>
+        ${summary}
+        ${body}
+      </details>` : '';
+    return (hidden ? LP.hiddenBytesHtml() : '') + details;
   }
 
   // hopEntries — optional inferPath entries aligned with pathHops.
@@ -4477,6 +4497,8 @@
   }
 
   let _themeRefreshHandler = null;
+
+  window.__meshcorePacketsInternals = { rawBytesHtml: rawBytesHtml };
 
   registerPage('packets', {
     init: function(app, routeParam) {
