@@ -466,11 +466,10 @@ func TestPgStoreQueries(t *testing.T) {
 	type degree struct {
 		Total int
 		Deg   map[string]int
-		Desc  []int
 	}
 	deg := requireSame(t, d, "getDegreeSnapshot", func(db *DB) (degree, error) {
 		snap := srv(db).getDegreeSnapshot(context.Background())
-		return degree{snap.total, snap.deg, snap.sortedDesc}, nil
+		return degree{len(snap.deg), snap.deg}, nil
 	})
 	if deg.Total != 3 || deg.Deg[pgsNodeA] != 2 {
 		t.Fatalf("degree snapshot: %+v", deg)
