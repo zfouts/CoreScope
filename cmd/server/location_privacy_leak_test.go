@@ -753,6 +753,7 @@ func leakRouteParams(f *lkFixture) map[string][]lkRequest {
 	advert := f.adverts[0]
 	// The distance between two points the client sent is not the server's secret.
 	ownPoints := map[string]string{"dist": "the legs join points of the request"}
+	ductingHour := fmt.Sprint(time.Now().Unix() / 3600 * 3600) // newest step of seedDuctingGrid
 
 	return map[string][]lkRequest{
 		// Config and system.
@@ -870,6 +871,14 @@ func leakRouteParams(f *lkFixture) map[string][]lkRequest {
 		"/api/elevation/profile": {
 			{path: "/api/elevation/profile?pts=" + url.QueryEscape(fz("repeater")+","+fz("relay")), want: `"legs"`, skip: ownPoints},
 		},
+		// Ducting (source gfs-grid). The grid is a public weather lattice; the
+		// long links join served node positions. /api/ducting is the
+		// Open-Meteo source's route, 404 under gfs-grid: its node read is
+		// TestDuctingNodeCoordsFuzzed.
+		"/api/ducting":       {{path: "/api/ducting", status: http.StatusNotFound, want: `"error"`}},
+		"/api/ducting/meta":  want(`"gfs-grid"`, "/api/ducting/meta"),
+		"/api/ducting/grid":  want(`"dm":[55]`, "/api/ducting/grid?t="+ductingHour+"&bbox="+lkAreaBBox),
+		"/api/ducting/links": want(rel, "/api/ducting/links", "/api/ducting/links?days=1"),
 		"/api/planner/profile": {
 			{path: "/api/planner/profile?pts=" + pt(lkProbeA) + "," + pt(lkProbeB), want: `"elev_m"`, skip: ownPoints,
 				probes: []geoPoint{lkProbeA, lkProbeB}},

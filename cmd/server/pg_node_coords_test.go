@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestPgNodeCoordsFuzzed runs every node coordinate reader (node_coords.go)
@@ -98,6 +99,24 @@ func TestPgNodeCoordsFuzzed(t *testing.T) {
 		served(t, "GetNodeLocationsByKeys", locs[pgqPkA].Lat, locs[pgqPkA].Lon)
 		if b, ok := locs[pgqPkB]; !ok || b.Lat != nil || b.Lon != nil {
 			t.Fatalf("GetNodeLocationsByKeys no-position row: %+v %v", b, ok)
+		}
+	})
+	t.Run("ductingNodeCoords", func(t *testing.T) {
+		coords := same(t, d, "ductingNodeCoords", false, func(db *DB) ([][2]float64, error) {
+			c, err := db.ductingNodeCoords(nil, time.Now())
+			sort.Slice(c, func(i, j int) bool { return c[i][0] < c[j][0] || (c[i][0] == c[j][0] && c[i][1] < c[j][1]) })
+			return c, err
+		})
+		wLa, wLo := fuzz.Fuzz(pgqPkA, storedLat, storedLon)
+		found := false
+		for _, c := range coords {
+			if c == [2]float64{storedLat, storedLon} {
+				t.Fatal("ductingNodeCoords served the stored position")
+			}
+			found = found || c == [2]float64{wLa, wLo}
+		}
+		if !found {
+			t.Fatalf("ductingNodeCoords %v: no fuzzed (%v, %v)", coords, wLa, wLo)
 		}
 	})
 	// The exact readers classify by the stored position on both backends.

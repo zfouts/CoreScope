@@ -374,3 +374,72 @@ func BenchmarkNodeCoordGetAllNodes(b *testing.B) {
 		})
 	}
 }
+
+// The ducting overlay (source open-meteo) computes its cells around node
+// positions: with location privacy on those are the approximate ones, while
+// the visibility rule still classifies by the stored position.
+func TestDuctingNodeCoordsFuzzed(t *testing.T) {
+	f := newTestLocFuzzer(t, 1000, testLocSecret)
+	in, out := edgeNodes(t, f)
+	plain := visNode{pubkey: fmt.Sprintf("ab%062x", 1), name: "Plain", lat: 30.2671, lon: -97.7431}
+	db := setupTestDB(t)
+	now := time.Now().UTC()
+	for _, n := range []visNode{in, out, plain} {
+		if _, err := db.conn.Exec(`INSERT INTO nodes (public_key, name, lat, lon, last_seen) VALUES (?, ?, ?, ?, ?)`,
+			n.pubkey, n.name, n.lat, n.lon, now.Add(-time.Hour).Format(time.RFC3339)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A rule like the geo_filter: south of the edge (lat 31) only.
+	stored := map[string][2]float64{}
+	visible := func(n *nodeInfo) bool {
+		lat, lon := n.geoFilterPos()
+		stored[n.PublicKey] = [2]float64{lat, lon}
+		return lat < 31
+	}
+	want := func(nodes ...visNode) map[[2]float64]bool {
+		m := map[[2]float64]bool{}
+		for _, n := range nodes {
+			la, lo := n.lat, n.lon
+			if fz := db.locationFuzzer(); fz != nil {
+				la, lo = fz.Fuzz(n.pubkey, n.lat, n.lon)
+			}
+			m[[2]float64{la, lo}] = true
+		}
+		return m
+	}
+	check := func(name string, wantNodes ...visNode) {
+		t.Helper()
+		coords, err := db.ductingNodeCoords(visible, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := want(wantNodes...)
+		if len(coords) != len(w) {
+			t.Fatalf("%s: coords %v, want %v", name, coords, w)
+		}
+		for _, c := range coords {
+			if !w[c] {
+				t.Fatalf("%s: coords %v, want %v", name, coords, w)
+			}
+		}
+		for _, n := range []visNode{in, out, plain} {
+			if stored[n.pubkey] != [2]float64{n.lat, n.lon} {
+				t.Fatalf("%s: rule saw %v for %s, want the stored position", name, stored[n.pubkey], n.name)
+			}
+		}
+	}
+
+	check("privacy off", in, plain)
+	db.setLocationFuzzer(f)
+	// in's approximate position is north of the edge and out's south of it:
+	// the rule must not follow them.
+	check("privacy on", in, plain)
+	for _, c := range func() [][2]float64 { c, _ := db.ductingNodeCoords(nil, now); return c }() {
+		for _, n := range []visNode{in, out, plain} {
+			if c == [2]float64{n.lat, n.lon} {
+				t.Fatalf("stored position of %s served with privacy on", n.name)
+			}
+		}
+	}
+}

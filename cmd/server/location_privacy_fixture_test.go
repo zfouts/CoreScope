@@ -26,6 +26,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/meshcore-analyzer/dbschema"
+	"github.com/meshcore-analyzer/ducting"
 	"github.com/meshcore-analyzer/users"
 )
 
@@ -324,6 +325,7 @@ func newLKFixture(t *testing.T) *lkFixture {
 		t.Fatalf("detectSchema: %v", err)
 	}
 	f.seed(t, db)
+	f.seedDuctingGrid(t, db)
 
 	big := func(v float64) *float64 { return &v }
 	cfg := &Config{
@@ -333,6 +335,7 @@ func newLKFixture(t *testing.T) *lkFixture {
 		LOS:              &LOSConfig{Enabled: true},
 		ClientRxCoverage: &ClientRxCoverageConfig{Enabled: true},
 		ClientRfSamples:  &ClientRfSamplesConfig{Enabled: true},
+		Ducting:          &DuctingConfig{Enabled: true}, // source gfs-grid: the stored grid and the long links
 		// The one consumer of exact positions the feature keeps: every seeded
 		// point is inside, with the edges far from all of them.
 		GeoFilter: &GeoFilterConfig{LatMin: big(35), LatMax: big(40), LonMin: big(-125), LonMax: big(-119)},
@@ -402,6 +405,11 @@ func newLKFixture(t *testing.T) *lkFixture {
 	t.Cleanup(planner.Close)
 	srv.planner = planner
 
+	// Ducting as main wires it under source gfs-grid: the stored grid, and
+	// the long-link analysis over the store's nodes and adverts.
+	srv.ductingGrid = newDuctingGridService(db, cfg)
+	srv.ductingLinks = newDuctingLinksState()
+
 	router := mux.NewRouter()
 	srv.RegisterRoutes(router)
 	f.authFixture = &authFixture{srv: srv, router: router, fake: fake, st: a.st}
@@ -419,6 +427,33 @@ func newLKFixture(t *testing.T) *lkFixture {
 	}
 	expectStatus(t, f.do("PUT", "/api/account/notifications/watches/"+f.repeater, map[string]any{}, as(f.user)), 200)
 	return f
+}
+
+// seedDuctingGrid stores the ducting forecast of this hour and the last: a
+// 0.5° lattice over 30..45 N, 130..115 W, every point a surface duct, so the
+// long-link analysis has a model step at each fixture reception. Its lattice
+// points are over 2 × radius from every fixture position.
+func (f *lkFixture) seedDuctingGrid(t *testing.T, db *DB) {
+	t.Helper()
+	hour := time.Now().Unix() / 3600 * 3600
+	for _, valid := range []int64{hour - 3600, hour} {
+		run := valid - 3600
+		g, err := ducting.NewGrid("gfs", run, valid, 45, -130, -0.5, 0.5, 31, 31)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range g.C {
+			g.C[i], g.F[i], g.B[i], g.T[i], g.DM[i], g.G[i], g.N[i] = ducting.ClassSurface, 150, 10, 120, 55, -200, -80
+		}
+		data, err := ducting.Encode(g)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.conn.Exec(`INSERT INTO ducting_grid (model, valid_time, run_time, lead_hours, data, created_at)
+			VALUES ('gfs', ?, ?, 1, ?, ?)`, valid, run, data, run+600); err != nil {
+			t.Fatalf("seed ducting_grid: %v", err)
+		}
+	}
 }
 
 // lkHop is the 3-byte path prefix of a node.
