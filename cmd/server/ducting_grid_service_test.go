@@ -258,7 +258,7 @@ func TestDuctingGridBBox(t *testing.T) {
 			t.Errorf("%q: %v %v, want %v", tc.in, got, err, tc.want)
 		}
 	}
-	if b, _ := ductingGridBBox("40,-0.001,50,1"); ductingGridETag(1, 2, 0.5, b) != `"1-2-0.5-40.00,0.00,50.00,1.00"` {
+	if b, _ := ductingGridBBox("40,-0.001,50,1"); ductingGridETag(1, 2, 0.5, b) != `W/"1-2-0.5-40.00,0.00,50.00,1.00"` {
 		t.Errorf("etag %s", ductingGridETag(1, 2, 0.5, b))
 	}
 }
@@ -358,13 +358,13 @@ func TestDuctingGridETagAndCache(t *testing.T) {
 	f.putGrid(t, 3600, 100, 101)
 	rec := ductingGridGet(f.svc, "t=3600&bbox=40.004,-10,60,10")
 	etag := rec.Header().Get("ETag")
-	if rec.Code != 200 || etag != `"100-3600-0.5-40.00,-10.00,60.00,10.00"` {
+	if rec.Code != 200 || etag != `W/"100-3600-0.5-40.00,-10.00,60.00,10.00"` {
 		t.Fatalf("%d ETag %q", rec.Code, etag)
 	}
 	if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=600" {
 		t.Errorf("Cache-Control %q", cc)
 	}
-	for _, inm := range []string{etag, "W/" + etag, `"x", ` + etag, "*"} {
+	for _, inm := range []string{etag, strings.TrimPrefix(etag, "W/"), `"x", ` + etag, "*"} {
 		r := ductingGridGet(f.svc, "t=3600&bbox=40,-10,60,10", "If-None-Match", inm)
 		if r.Code != http.StatusNotModified || r.Body.Len() != 0 || r.Header().Get("ETag") != etag {
 			t.Errorf("If-None-Match %s: %d, %d bytes", inm, r.Code, r.Body.Len())
@@ -377,12 +377,12 @@ func TestDuctingGridETagAndCache(t *testing.T) {
 	if e := ductingGridGet(f.svc, "t=3600&bbox=40,-10,60,11").Header().Get("ETag"); e == etag {
 		t.Error("other box, same ETag")
 	}
-	if e := ductingGridGet(f.svc, "t=3600&bbox=-90,-180,90,180").Header().Get("ETag"); !strings.HasPrefix(e, `"100-3600-8-`) {
+	if e := ductingGridGet(f.svc, "t=3600&bbox=-90,-180,90,180").Header().Get("ETag"); !strings.HasPrefix(e, `W/"100-3600-8-`) {
 		t.Errorf("world ETag %s", e)
 	}
 	f.putGrid(t, 3600, 300, 301)
 	f.advance()
-	if e := ductingGridGet(f.svc, "t=3600&bbox=40,-10,60,10").Header().Get("ETag"); !strings.HasPrefix(e, `"300-3600-`) {
+	if e := ductingGridGet(f.svc, "t=3600&bbox=40,-10,60,10").Header().Get("ETag"); !strings.HasPrefix(e, `W/"300-3600-`) {
 		t.Errorf("new run ETag %s", e)
 	}
 }
@@ -541,7 +541,7 @@ func TestDuctingGridReplacedRow(t *testing.T) {
 	}
 	// The handler serves the new run.
 	rec := ductingGridGet(f.svc, "t=3600&bbox=49,-1,51,1")
-	if !strings.HasPrefix(rec.Header().Get("ETag"), `"200-3600-`) || !strings.Contains(rec.Body.String(), `"generatedAt":201`) {
+	if !strings.HasPrefix(rec.Header().Get("ETag"), `W/"200-3600-`) || !strings.Contains(rec.Body.String(), `"generatedAt":201`) {
 		t.Fatalf("%q %s", rec.Header().Get("ETag"), rec.Body.String())
 	}
 	// A row list older than the blob: the newer blob is served and kept,

@@ -433,10 +433,12 @@ func ductingGridBBox(v string) (box [4]float64, err error) {
 	return box, nil
 }
 
-// ductingGridETag is `"<run>-<valid>-<step>-<s,w,n,e>"`.
+// ductingGridETag is `W/"<run>-<valid>-<step>-<s,w,n,e>"`: weak, like
+// /api/ducting's, because the gzip middleware sends the same tag with the
+// compressed and the identity body (the same grid, not the same bytes).
 func ductingGridETag(run, valid int64, step float64, box [4]float64) string {
 	var b strings.Builder
-	b.WriteByte('"')
+	b.WriteString(`W/"`)
 	b.WriteString(strconv.FormatInt(run, 10))
 	b.WriteByte('-')
 	b.WriteString(strconv.FormatInt(valid, 10))
