@@ -119,3 +119,108 @@ func parseHexCell(id string) (res, q, r int, ok bool) {
 	}
 	return a, b, c, true
 }
+
+// ─── Location privacy: companion GPS fixes as cells ─────────────────────────
+//
+// With location privacy on (location_privacy.go), a companion GPS fix
+// (client_receptions, client_rf_samples) is never used as it is: every route
+// built on those tables first replaces each fix by the centre of its privacy
+// cell (fixCellCentre) and only then filters, bins and measures. Everything
+// such a route serves is therefore a function of cell centres, whatever the
+// request (bbox, zoom), so no combination of requests places a fix better
+// than its cell. The display hexes are binned from those centres and are
+// themselves no smaller than the radius (maxHexResForRadius).
+//
+// The privacy grid is public and deterministic: rows fixCellFrac·R high,
+// and per row a whole number of columns at least fixCellFrac·R wide at the
+// row's poleward edge (so the antimeridian is never inside a cell). A cell is
+// thus at least 2R × 2R on the ground.
+
+// fixCellFrac is the privacy cell side as a multiple of the radius.
+const fixCellFrac = 2.0
+
+// fixCellMaxLat keeps the column width finite next to the poles.
+const fixCellMaxLat = 89.9
+
+// fixCellCols is the number of privacy cell columns of a row whose poleward
+// edge is at latitude edge, for cells of side sideM metres.
+func fixCellCols(edge, sideM float64) float64 {
+	edge = math.Min(math.Abs(edge), fixCellMaxLat)
+	return math.Max(1, math.Floor(360*math.Cos(edge*math.Pi/180)*locMetresPerDeg/sideM))
+}
+
+// fixCellCentre returns the centre of the privacy cell that holds the fix
+// (lat, lon) for the radius radiusM; the fix itself when radiusM <= 0 (privacy
+// off). Pure maths, no allocation: it runs once per row of a scan.
+func fixCellCentre(radiusM, lat, lon float64) (float64, float64) {
+	if radiusM <= 0 || math.IsNaN(lat) || math.IsNaN(lon) || math.IsInf(lat, 0) || math.IsInf(lon, 0) {
+		return lat, lon
+	}
+	side := fixCellFrac * radiusM
+	h := side / locMetresPerDeg
+	lat = math.Max(-90, math.Min(90, lat))
+	lon = wrapLon(lon)
+	row := math.Floor(lat / h)
+	latC := math.Max(-90, math.Min(90, (row+0.5)*h))
+	ncol := fixCellCols(math.Max(math.Abs(row*h), math.Abs((row+1)*h)), side)
+	dLon := 360 / ncol
+	col := math.Min(math.Floor((lon+180)/dLon), ncol-1)
+	return latC, -180 + (col+0.5)*dLon
+}
+
+// widenForFixCells grows b so it holds every fix whose privacy cell centre
+// lies in b: the SQL prefilter still uses the (lat, lon) index, and
+// binFixesInBBox then keeps exactly the fixes whose centre is inside b.
+func (b bbox) widenForFixCells(radiusM float64) bbox {
+	if radiusM <= 0 {
+		return b
+	}
+	side := fixCellFrac * radiusM
+	h := side / locMetresPerDeg
+	// Columns only get wider poleward: the width at two rows beyond the
+	// bbox bounds every cell whose centre is inside it.
+	edge := math.Max(math.Abs(b.MinLat), math.Abs(b.MaxLat)) + 2*h
+	dLon := 360 / fixCellCols(edge, side)
+	return bbox{MinLat: b.MinLat - h, MaxLat: b.MaxLat + h, MinLon: b.MinLon - dLon, MaxLon: b.MaxLon + dLon}
+}
+
+// contains reports whether (lat, lon) lies in b, bounds included (the SQL
+// BETWEEN semantics).
+func (b bbox) contains(lat, lon float64) bool {
+	return lat >= b.MinLat && lat <= b.MaxLat && lon >= b.MinLon && lon <= b.MaxLon
+}
+
+// binFixesInBBox replaces, in place, every fix of rows by its privacy cell
+// centre (pos returns pointers to a row's lat and lon) and keeps the rows
+// whose centre lies in b. O(n), no allocation: the result reuses rows.
+func binFixesInBBox[T any](rows []T, radiusM float64, b bbox, pos func(*T) (lat, lon *float64)) []T {
+	out := rows[:0]
+	for i := range rows {
+		la, lo := pos(&rows[i])
+		*la, *lo = fixCellCentre(radiusM, *la, *lo)
+		if b.contains(*la, *lo) {
+			out = append(out, rows[i])
+		}
+	}
+	return out
+}
+
+// maxHexResForRadius is the finest display resolution whose hexes, anywhere
+// within one cell of latitude lat (poleward), have a ground circumradius of at
+// least radiusM. Web Mercator shrinks a hex on the ground by cos(latitude),
+// so the bound is taken at the poleward edge, and ground metres are those of
+// the earthRadiusKm sphere every CoreScope distance uses. 0 when even that is
+// too fine.
+func maxHexResForRadius(radiusM, lat float64) int {
+	a := math.Min(math.Abs(lat), hexMaxLat)
+	const ground = earthRadiusKm * 1000 / hexEarthRadius // metres per Mercator unit at the equator
+	for res := 18; res > 0; res-- {
+		size := hexSizeForRes(res)
+		// A Mercator unit spans at most 1/hexEarthRadius rad of latitude.
+		edge := math.Min(hexMaxLat, a+size/hexEarthRadius*180/math.Pi)
+		if size*ground*math.Cos(edge*math.Pi/180) >= radiusM {
+			return res
+		}
+	}
+	return 0
+}

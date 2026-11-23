@@ -115,8 +115,10 @@ func (s *Server) queryCoverageFiltered(node, rx string, rxIn []string, days int,
 	if rxIn != nil && len(rxIn) == 0 {
 		return nil, nil
 	}
+	radius := s.cfg.LocationFuzzer().RadiusM()
+	qb := b.widenForFixCells(radius)
 	where := []string{"lat BETWEEN ? AND ?", "lon BETWEEN ? AND ?"}
-	args := []interface{}{b.MinLat, b.MaxLat, b.MinLon, b.MaxLon}
+	args := []interface{}{qb.MinLat, qb.MaxLat, qb.MinLon, qb.MaxLon}
 	if node != "" {
 		// Sargable heard_key IN-list (see coverageHeardKeyCandidates) so the
 		// (heard_key, …) composite index is used instead of a substr() scan (#5).
@@ -137,7 +139,11 @@ func (s *Server) queryCoverageFiltered(node, rx string, rxIn []string, days int,
 		return nil, err
 	}
 	defer rows.Close()
-	return scanCoverageRows(rows)
+	out, err := scanCoverageRows(rows)
+	if err != nil {
+		return nil, err
+	}
+	return binCoverageRows(out, radius, b), nil
 }
 
 // appendRxFilter narrows a client_* table query to one companion (rx) and/or
@@ -201,7 +207,8 @@ func (s *Server) handleRxCoverage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "query failed", http.StatusInternalServerError)
 		return
 	}
-	fc := aggregateCoverage(rows, zoomToHexRes(z), s.heardKeyResolverFor(rows))
+	res := s.coverageHexRes(z, b)
+	fc := aggregateCoverage(rows, res, s.heardKeyResolverFor(rows))
 	// "Nothing received" cells need the track, so only with the RF sample
 	// stream on; with ?node= the question would be "this node not heard",
 	// which these cells do not answer. Not with ?mine=1 either: the track
@@ -212,7 +219,7 @@ func (s *Server) handleRxCoverage(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
-		fc.Gaps, fc.GapsTruncated = aggregateGaps(track, rows, zoomToHexRes(z))
+		fc.Gaps, fc.GapsTruncated = aggregateGaps(track, rows, res)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(fc)
@@ -268,7 +275,10 @@ type RxLeaderboardResp struct {
 // "cells visited" for the frontier-weighted score. ~150 m ground cells at our
 // latitude: coarse enough that a parked node's GPS jitter stays in one cell,
 // fine enough that real driving paints many. Independent of the coverage map's
-// zoom-dependent render resolution so the ranking is stable across views.
+// zoom-dependent render resolution so the ranking is stable across views. With
+// location privacy on, fixes are binned to their privacy cell centres first and
+// the resolution is capped at maxHexResForRadius: sharing a cell with another
+// observer (the frontier weight) must not place a fix better than the radius.
 const leaderboardHexRes = 13
 
 // leaderboardScanCap bounds how many rows the leaderboard aggregates in memory.
@@ -311,6 +321,7 @@ func (s *Server) rxLeaderboard(ctx context.Context, days, limit int) ([]LeaderOb
 		cells      map[string]struct{}
 		nodes      map[string]struct{}
 	}
+	radius := s.cfg.LocationFuzzer().RadiusM()
 	obsAgg := map[string]*agg{}
 	cellObservers := map[string]map[string]struct{}{} // cell -> set of rx_pubkey
 
@@ -334,7 +345,14 @@ func (s *Server) rxLeaderboard(ctx context.Context, days, limit int) ([]LeaderOb
 		}
 		a.receptions++
 		a.nodes[heardKey] = struct{}{}
-		cell := hexCellAt(lat, lon, leaderboardHexRes)
+		res := leaderboardHexRes
+		if radius > 0 {
+			lat, lon = fixCellCentre(radius, lat, lon)
+			if c := maxHexResForRadius(radius, lat); c < res {
+				res = c
+			}
+		}
+		cell := hexCellAt(lat, lon, res)
 		a.cells[cell] = struct{}{}
 		set := cellObservers[cell]
 		if set == nil {
