@@ -58,3 +58,12 @@ require (
 replace github.com/meshcore-analyzer/channel => ../../internal/channel
 
 replace github.com/meshcore-analyzer/dbx => ../../internal/dbx
+
+require (
+	github.com/meshcore-analyzer/ducting v0.0.0
+	github.com/meshcore-analyzer/grib2 v0.0.0
+)
+
+replace github.com/meshcore-analyzer/ducting => ../../internal/ducting
+
+replace github.com/meshcore-analyzer/grib2 => ../../internal/grib2

@@ -268,5 +268,6 @@ node tests/unit/test-map-overlays-vector.js
 node tests/unit/test-map-tile-pin.js
 node tests/unit/test-issue-2444-secondary-map-tile-sync.js
 node tests/unit/test-issue-2461-stale-detail-load.js
+node tests/unit/test-map-ducting.js
 
 echo "All standalone frontend suites passed"

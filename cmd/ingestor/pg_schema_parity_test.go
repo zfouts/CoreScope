@@ -142,6 +142,8 @@ func sqliteTypeClass(decl string) string {
 		return "real"
 	case strings.Contains(u, "TEXT"), strings.Contains(u, "CHAR"), strings.Contains(u, "CLOB"), u == "DATETIME":
 		return "text"
+	case strings.Contains(u, "BLOB"):
+		return "binary"
 	}
 	return "unknown sqlite type " + decl
 }
@@ -154,6 +156,8 @@ func postgresTypeClass(dataType string) string {
 		return "real"
 	case "text":
 		return "text"
+	case "bytea":
+		return "binary"
 	}
 	return "unmapped postgres type " + dataType
 }

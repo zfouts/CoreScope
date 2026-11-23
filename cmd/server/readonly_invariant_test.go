@@ -56,6 +56,9 @@ func TestServerSourceHasNoCachedRWCalls(t *testing.T) {
 		nodeTableWritePattern(`INSERT\s+(OR\s+\w+\s+)?INTO`, ``),
 		nodeTableWritePattern(`REPLACE\s+INTO`, ``),
 		nodeTableWritePattern(`DELETE\s+FROM`, ``),
+		// ducting_grid is ingestor-owned: the server may not create it or
+		// write any row (cmd/ingestor/ducting_store.go).
+		regexp.MustCompile(`(?is)\b(INSERT\s+(OR\s+\w+\s+)?INTO|REPLACE\s+INTO|DELETE\s+FROM|UPDATE(\s+OR\s+\w+)?|CREATE\s+TABLE(\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(\s+IF\s+EXISTS)?|ALTER\s+TABLE)\s+"?ducting_grid\b`),
 		regexp.MustCompile(`\bpersistMultibyteCapability\s*\(`),
 		regexp.MustCompile(`\bmaybePersistMultibyteCapability\s*\(`),
 	}
@@ -108,6 +111,11 @@ func TestServerDBHasNoWriteMethods(t *testing.T) {
 		// ingestor's *Store. The server's HTTP handler now enqueues a
 		// marker file (see internal/prunequeue); it does not write.
 		"DeleteNodesByPubkeys",
+		// ducting_grid is created and written by the ingestor only
+		// (cmd/ingestor/ducting_store.go); the server just SELECTs.
+		"UpsertDuctingGrid",
+		"PruneDuctingGrid",
+		"LatestDuctingRun",
 		// #1324 follow-up: PR #903 originally added these to *PacketStore
 		// (not *DB), and they UPDATEd nodes/inactive_nodes from a
 		// mode=ro handle. After relocation, the methods live in the

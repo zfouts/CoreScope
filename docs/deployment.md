@@ -567,6 +567,198 @@ The `hillshade` overlay shades terrain in the visitor's browser from Terrarium-e
 
 The tile host must allow cross-origin image reads (`Access-Control-Allow-Origin`); without it the browser cannot read pixels and the overlay stays blank. It is off for visitors until they tick it.
 
+#### Tropospheric ducting overlay
+
+Under some weather conditions a layer of the lower atmosphere traps radio waves and carries them far beyond the horizon. The ducting overlay shows, from a weather model, where that can happen and whether the duct is able to carry LoRa. It shows up as an **Overlays** entry named "Tropospheric ducting" on the Map, Live and Repeater Planner pages, but only when you enable it. It is off by default.
+
+The LoRa verdict (the dashed outline and the popup's LoRa lines) is judged against `los.frequencyMhz`, the frequency the line-of-sight tools use, when line of sight is enabled and you have set it to your mesh's frequency (for example 869.525 in Europe). With line of sight off, or with `los.frequencyMhz` left at its default of 910.525 MHz, the overlay judges 868 and 915 MHz separately: the default alone does not tell it which band your mesh uses. On a 910.525 MHz mesh the dashed outline is the same either way (the figure it is compared with is rounded to two significant figures, so nothing falls between 910.525 and 915); the popup shows the 868 and 915 MHz lines instead of one line for 910.525. (The observed long links, below, are tested by the server against `los.frequencyMhz` whenever line of sight is enabled, the default included, and against 868 MHz only when it is off.)
+
+Enable it in `config.json`:
+
+```json
+"ducting": { "enabled": true }
+```
+
+There are two sources for the weather data. `ducting.source` picks one:
+
+| `source` | What it does | Needs |
+|----------|--------------|-------|
+| `"gfs-grid"` (default) | The **ingestor** downloads the NOAA GFS 0.5 degree model for the whole world, computes ducting for every grid point and stores it in the database. The map has a time slider over the past days and the forecast, and shows observed long links. | Outbound HTTPS from the ingestor to NOAA's public bucket. About 40 MB of database for the default history. |
+| `"open-meteo"` | The **server** fetches a forecast from Open-Meteo for the area around your nodes and keeps it in memory. Forecast only, no history, no long links. | Outbound HTTPS from the server to Open-Meteo. Non-commercial use only on the public API. |
+
+With `"ducting": { "enabled": true }` and no `source`, you get `gfs-grid`. An unknown `source` value falls back to `gfs-grid` with a warning. Everything about `gfs-grid` is in the next section; the Open-Meteo section after it is the alternative.
+
+##### Global grid (`gfs-grid`)
+
+The ingestor, not the server, talks to the weather provider. The server stays read-only on the analyzer database: it only reads the stored grid and serves it.
+
+Keys that apply to `gfs-grid` (all optional):
+
+| Key | Default | Allowed | Meaning |
+|-----|---------|---------|---------|
+| `source` | `"gfs-grid"` | `gfs-grid`, `open-meteo` | Where the data comes from. |
+| `historyDays` | `7` | `1` to `30` | Days of past grids kept, and offered by the time slider and the long-links summary. Keep it inside 1 to 30: a value outside that range is clamped by the ingestor but replaced by the default (7) by the server, so the two disagree (a warning naming the key is logged by each). |
+| `forecastHours` | `48` | `1` to `120` | How many hours ahead each run computes. Rounded up to a multiple of 3 (GFS 0.5 degree steps are 3-hourly). Read by the ingestor only. |
+| `gridBaseUrl` | `"https://noaa-gfs-bdp-pds.s3.amazonaws.com"` | `https` URL with a host, no credentials, query or fragment; plain `http` only for `localhost` or a loopback IP | Where the ingestor downloads GFS files from: NOAA's bucket, or a mirror with the same layout. Read by the ingestor only; never sent to browsers. An invalid value is ignored with a warning, which does not print the URL. |
+
+`model`, `area`, `marginDeg`, `gridStepDeg`, `maxPoints`, `refreshMinutes` and `baseUrl` are not used by `gfs-grid`: the grid is always global, 0.5 degree, NOAA GFS. The model is fixed.
+
+```json
+"ducting": {
+  "enabled": true,
+  "source": "gfs-grid",
+  "historyDays": 7
+}
+```
+
+To use a mirror, add `"gridBaseUrl": "https://gfs-mirror.example.org"`.
+
+**It makes outbound requests.** The ingestor needs outbound HTTPS to `noaa-gfs-bdp-pds.s3.amazonaws.com` (or your `gridBaseUrl`). Allow it in any egress firewall or proxy rule for the ingestor container. Visitors' browsers never contact NOAA, and the server makes no outbound request for ducting.
+
+**What it downloads.** GFS publishes a new run every 6 hours. The ingestor checks every 30 minutes (the first check is 30 seconds after start) for a run it has not stored yet, and uses the newest one whose last step is published. Per 3-hourly step, from the run's analysis (f000) to `forecastHours` (f048 by default), it fetches 43 fields by HTTP byte range, not whole files: surface pressure, surface height, 2 m temperature and humidity, and temperature, humidity and geopotential height at 13 pressure levels from 1000 to 700 hPa. That is about 186 MB per run (measured on a dev instance) and about 750 MB a day. The ingestor does not follow redirects, caps what it reads, and stops a run that goes over 300 MB.
+
+**What it computes and stores.** For every grid point and step it computes the duct class, base, top, strength, lowest trapped frequency and the mean refractivity gradient, with the same physics as described under *How it is calculated* below. One step is held in memory at a time. A run took about 31 seconds on a dev instance and keeps the CPU busy for that time; one run at a time. Each step is one row in the `ducting_grid` table, about 550 KB. A step's time keeps the freshest run that covers it: when a newer run reaches a time already stored, it replaces the row, so past times show the latest analysis or short forecast for that time, not the first forecast made for it. After each run, steps older than `historyDays` are deleted.
+
+**Storage.** There are 8 steps a day, so about 4.4 MB a day of history plus the forecast (17 steps at the default 48 hours, about 9 MB):
+
+| `historyDays` | Approximate `ducting_grid` size |
+|---------------|---------------------------------|
+| 1 | 13 MB |
+| 7 (default) | 40 MB |
+| 14 | 70 MB |
+| 30 | 140 MB |
+
+These are estimates from the 550 KB step size. SQLite reuses the space of deleted rows but does not shrink the file by itself.
+
+**What the server serves** (read-only, public, and `404` unless ducting is enabled with `gfs-grid`; `GET /api/ducting` itself answers `404` under `gfs-grid`):
+
+- `GET /api/ducting/meta`: the stored times, the model run and the history length. Cached for 1 minute.
+- `GET /api/ducting/grid?t=<unix>&bbox=<south,west,north,east>`: the stored step nearest `t`, cut to the box. A window is at most 4,000 cells: the grid is merged into coarser square cells (0.5, 1, 2, 4 or 8 degrees) until the box fits, so zooming out gives a coarser field. It carries an `ETag` and may be cached for 10 minutes. A client that makes many requests that each need a stored step decoded is limited per IP address and gets `429` with `Retry-After`.
+- `GET /api/ducting/links?days=<n>`: the observed long links, see below. `days` is 1 to `historyDays`.
+
+**Observed long links.** The map can draw node pairs that hear each other although there is no line of sight between them, over the time slider's period, and compare them with the modelled weather along the path. The server builds them from packets already in the store; nothing is written.
+
+- **What counts as a reception.** Only certain evidence: (1) a zero-hop advert (no relay hops in the path) heard by an observer that is itself a node, and (2) consecutive hops of a flood path whose hash prefixes each resolve to exactly one node (the same rule that decides a node's last-heard time): the origin to the first relay (adverts only) and relay to relay. A shared 1-byte prefix is not evidence. Direct-routed packets give no pairs. One reception is kept per transmission and pair; a relay reception has no SNR or RSSI, because those belong to the last hop's link to the observer. Adverts with a failed signature, the observer's own transmissions, and nodes without a position are left out.
+- **Which pairs are candidates.** With the line-of-sight terrain service configured (`los`), a pair counts only if the SRTM terrain profile, at the LoS k-factor, blocks the direct ray; a path that is only Fresnel-marginal counts as line of sight. Legs longer than the LoS maximum, or over tiles that cannot be loaded as one profile, use the k-earth horizon from antenna height plus ground elevation. Without `los`, the smooth-earth horizon from antenna heights is used. Pairs more than 1,000 km apart are dropped as bad positions. Terrain verdicts are cached; at most 400 new ones are computed per rebuild, longest pairs first, and the summary's `unverifiedPairs` counts the rest, which are left out until a later rebuild checks them.
+- **Antenna heights** come from the heights users entered for their repeaters, when user management is on; otherwise, or when a repeater has none, from `los.antennaHeightM` (default 5 m). The map marks a height as "site default" when it was assumed.
+- Hidden and blacklisted nodes and observers never appear, under the same rule as `/api/nodes`.
+- **Metrics per reception.** The server takes the stored step within 90 minutes of it, samples the great-circle path every 25 km (at most 64 samples) and records the mean refractivity gradient along the path (N/km, lowest 1.5 km), the share of the path in the map's High band (mean gradient at or below -62 N/km), the super-refractive share, and the share where the model shows a duct that can carry the frequency (`los.frequencyMhz` when line of sight is on, else 868 MHz).
+- **Summary.** Over the listed pairs (the 500 longest) and the period, it compares the receptions with the same paths at every stored step: mean path gradient when heard against overall, and the share of receptions with at least half the path in the High band against the same share overall. It also counts receptions with at least half the path in a duct that can carry LoRa.
+- **Heard share by gradient.** For every pair and every 3-hour step with model data, the step is binned by the path's mean gradient (above -40, -40 to -50, -50 to -62, and -62 or lower N/km), and the table gives the share of steps in which the pair was heard. It is given for all pairs and for intermittent pairs: heard in at least one but fewer than 90% of their steps. A pair that is heard in nearly every step is heard whatever the weather, so it says nothing about it.
+- Receptions listed per pair are thinned to the newest per 3-hour step (at most 8 a day).
+
+The answer is cached for 5 minutes and refreshed in the background. Rebuilds are rate-limited per client (10 a minute). Each stored step is decoded at most once per rebuild, one at a time.
+
+**Limitations.** Say these to your users:
+
+- The model grid is 0.5 degrees (about 55 km north-south) and its levels are about 200 to 250 m apart near the ground, so thin ducts, including most evaporation ducts over the sea, are invisible, and a cell says nothing about local terrain.
+- Past times are the model's analysis or a short forecast for that time, not measurements. Steps are 3-hourly; a reception is matched to the nearest step within 90 minutes.
+- Node positions are self-reported. A wrong position can make a short link look long. Heights default to `los.antennaHeightM` when unknown; with antennas higher than that, "beyond line of sight" is overstated, and with lower ones it is understated. Without `los` terrain, the pair test uses antenna heights only and ignores hills.
+- A pair heard while the model shows a strong gradient does not show that the gradient carried the signal. Persistent pairs are heard in all weather. A rising heard share towards the High band, most clearly among intermittent pairs, would suggest that weather matters; a flat one suggests it does not, or that the model cannot see it (0.5 degree cells, levels about 200 m apart). No effect is claimed here; the table is there to test it on your own data.
+- A view that crosses the antimeridian (180 degrees longitude) shows only one side of it. The grid and the long links are computed worldwide; only the map window is cut.
+
+**Attribution.** The legend shows "Weather data: NOAA GFS 0.5° (NOAA Open Data Dissemination)"; do not hide it.
+
+**Licence and limits.** NOAA GFS output is data from a US government agency, published through NOAA's Open Data Dissemination program for public use. CoreScope needs no API key and applies no rate limit of its own; it downloads only while a run is in progress. The Open-Meteo API's non-commercial restriction does not come into play. If you have specific licensing or redistribution needs, read NOAA's terms for the data yourself; this page does not replace them.
+
+**Several instances.** Every ingestor downloads its own copy, about 186 MB per run. If many instances share a network, mirror the bucket and set `gridBaseUrl`.
+
+##### Open-Meteo (`source: "open-meteo"`)
+
+Set `"source": "open-meteo"` to use the per-point forecast from Open-Meteo instead. The keys `model`, `area`, `marginDeg`, `gridStepDeg`, `maxPoints`, `refreshMinutes`, `forecastHours` and `baseUrl` below apply to this source only (`forecastHours` is also read by the `gfs-grid` ingestor job, with the meaning given above). `historyDays` and `gridBaseUrl` do nothing here. There is no history, no time slider over past days and no long links with this source.
+
+```json
+"ducting": { "enabled": true, "source": "open-meteo" }
+```
+
+**It makes outbound requests.** With this source the server downloads a pressure-level weather forecast from [Open-Meteo](https://open-meteo.com) (`api.open-meteo.com`). Visitors' browsers never contact Open-Meteo; they only read the result from `GET /api/ducting` on your server. Nothing is written to the database. The forecast is held in memory and rebuilt after a restart.
+
+**With this source, running your own Open-Meteo is recommended, not required.** The public API works out of the box for a non-commercial site: the call budget below keeps one instance inside the free limits, by making the grid coarser or the refreshes less frequent when it has to. A self-hosted Open-Meteo has no call limits at all. CoreScope switches the budget off for it, so the grid, the refresh interval and the number of replicas are no longer limited by API calls. What it costs is running that instance: it downloads and stores the forecast model's data itself (see *Self-hosting Open-Meteo* below). Self-hosting is required only where Open-Meteo's terms require it: the free public API is for non-commercial use.
+
+Open-Meteo's free API is for **non-commercial use only** (data licence CC BY 4.0), and has limits of 600 calls per minute, 5,000 per hour and 10,000 per day. The limits count per IP address: several CoreScope instances on one host or behind one NAT address (for example a live and a staging instance) share them, and each instance's own call budget (below) does not know about the others. Give only one of them the ducting overlay, or point the others at a self-hosted Open-Meteo. The same applies to several server replicas of one installation behind a load balancer: each replica fetches the forecast on its own, so N replicas use N times the calls, and until every replica has refreshed they can answer with different forecasts. With more than one replica, point `baseUrl` at a self-hosted Open-Meteo. For a commercial deployment, self-host Open-Meteo (open source, AGPL) and point `baseUrl` at it, see below. There is no API-key setting.
+
+The map colours the mean refractivity gradient over the lowest 1.5 km above ground (N/km), the ITU-R P.453 style gradient, which tracks where radio signals bend most. On high terrain the models' top level (700 hPa, usually about 2,900 to 3,200 m above sea level) can be less than 1.5 km above the ground; there the mean is taken over the depth that is available, as long as it is at least 1 km. In practice a cell whose model ground is up to roughly 1,500 m gets the full 1.5 km mean, one up to roughly 2,000 m (Denver, about 1,600 m, for example) the shallower mean, and one higher than that gets no colour: Mexico City (about 2,240 m, 700 hPa only about 860 m above the ground), Bogotá or the high Andes and Tibet have no field value. Their duct class is still computed from the levels there are. `GET /api/ducting` carries the mean per cell and hour as `n` (N/km, rounded) next to the duct class and the other fields. `n` = 0 means no data (no forecast, or less than 1 km of profile above the ground), not a zero gradient.
+
+The defaults suit most sites. All keys are optional:
+
+| Key | Default | Allowed | Meaning |
+|-----|---------|---------|---------|
+| `source` | `"gfs-grid"` | `gfs-grid`, `open-meteo` | Must be `open-meteo` for the keys below to apply. |
+| `enabled` | `false` | `true` / `false` | Turns the feature on. When off, the ducting endpoints return 404 and the overlay is not offered. |
+| `model` | `"gfs"` | `gfs`, `icon`, `rrfs-conus` | Weather model, see the table below. |
+| `area` | none | `[south, west, north, east]` in degrees | Forecast this box instead of the bounding box of your nodes. `-90 <= south < north <= 90`, `-180 <= west < east <= 180`. An invalid value is ignored with a warning. |
+| `marginDeg` | `5` | `0` to `10` | Degrees added on every side of the bounding box of your nodes, so the overlay reaches past the outermost nodes. `0` forecasts just the bounding box itself. Ignored when `area` is set. |
+| `gridStepDeg` | `0.5` | `0.25` to `2` | Grid cell size in degrees. |
+| `maxPoints` | `450` | `1` to `1000` | Most grid cells (forecast points) to fetch. With the other defaults the grid keeps 0.5 degree cells only while the nodes' box plus the 5 degree margin fits in 450 cells, which means nodes spread over at most about half a degree each way (21 x 21 = 441 cells); a wider mesh gets 1 degree cells (nodes spread up to about 11 degrees each way), see *Call budget*. The server may lower this further to stay inside the daily call budget. |
+| `refreshMinutes` | `360` | `60` to `1440` | How often to fetch a new forecast. GFS itself only runs every 6 hours. |
+| `forecastHours` | `48` | `1` to `120` | How many hours ahead the time slider can go. At least the refresh interval in hours (rounded up) plus 2, so a forecast never runs out before the next one lands; a smaller value is raised with a warning. |
+| `baseUrl` | `"https://api.open-meteo.com"` | absolute `http(s)` URL, no credentials | Open-Meteo server to use. |
+
+A value outside its allowed range is replaced by the default and a warning naming the key is logged at startup (`[ducting] ...`). Warnings never print `baseUrl`.
+
+By default the forecast covers the bounding box of your nodes plus `marginDeg` (5 degrees) on every side, filled edge to edge, so the map's normal view is covered with a continuous field with no gaps between nodes. The box takes the shortest way round the globe: nodes at 179 and -179 degrees longitude give a narrow box across the antimeridian, not one 358 degrees wide. Cell centres are always longitudes from -180 up to (not including) 180. Set `area` to forecast a fixed region instead (the box and `marginDeg` are then ignored).
+
+Which nodes place the box:
+
+- Only nodes with a position whose `last_seen` is within the last 14 days. A node not heard for longer, or with no readable `last_seen`, is left out.
+- Nodes that are hidden or blacklisted are left out, so they cannot stretch the box.
+- With 5 or more such nodes, nodes far from the rest are left out: the server takes the median latitude and the median longitude of the nodes (longitude measured along the shortest way round, so a mesh across the antimeridian is handled correctly), and drops every node farther from that point than 500 km or 4 times the median distance of all nodes from it, whichever is larger. A few nodes far away (in a mesh of 20 or more, even several advertising the same wrong position) then cannot stretch the grid across an ocean, while a mesh genuinely spread over a region (say from Texas to Florida) is kept whole. At most 10% of the nodes (or one node, in a mesh of fewer than 20) are left out this way: if more are that far away, only the farthest ones are left out, up to that limit, and the rest stay in the box, since the mesh may genuinely span several areas (set `area` if you want a tighter grid). With fewer than 5 nodes nothing is left out. The regions-around-nodes fallback (see *Call budget*) still covers every node.
+
+Each refresh logs the grid it used, without naming any node: `[ducting] grid: box S..N, W..E (k nodes, t trimmed), step X deg, C cells` (`k` nodes inside the box, `t` left out as outliers; W is greater than E when the box crosses the antimeridian). With `area` set the line reads `[ducting] grid: area S..N, W..E, step X deg, C cells`.
+
+**On a public instance, set `area`.** Without it the grid follows whatever positions nodes advertise, so anyone who can get a node onto your map can move part of the forecast, within the limits above. With `area` set the grid stays where you put it, whatever the nodes advertise.
+
+**Models**
+
+| `model` | Coverage | Pressure levels (1000 hPa up to) | Notes |
+|---------|----------|-----------------------------------|-------|
+| `gfs` (default) | Worldwide, NOAA GFS | 700 hPa, every 25 hPa (13 levels) | Best vertical detail of the global models. |
+| `icon` | Worldwide, DWD ICON | 700 hPa, 8 levels (1000, 975, 950, 925, 900, 850, 800, 700) | Fewer low levels, so thin ducts are more likely to be missed. Cheaper per point. |
+| `rrfs-conus` | Contiguous United States only | 700 hPa, every 25 hPa (13 levels) | Explicit opt-in, never the default. If `area` is unset, or reaches outside the contiguous US, a warning is logged and cells outside have no data. |
+
+**Call budget**
+
+This section applies to the public Open-Meteo API only; see *Self-hosting Open-Meteo* below.
+
+Open-Meteo counts a request with more than 10 variables as several calls. CoreScope asks for temperature, humidity and height at every level plus three surface values. For GFS that is 42 variables per point, so **4.2 calls per point per refresh** (ICON: 27 variables, 2.7 calls).
+
+The server limits the number of points so a day stays under 8,000 calls, leaving headroom below the 10,000 free limit: points <= 8,000 / (calls per point x refreshes per day). The effective limit is `min(maxPoints, that value)`, and is logged at startup. With the defaults, 450 points every 6 hours (4 refreshes a day) is 450 x 4.2 x 4 = about 7,600 calls a day (the GFS cap at that refresh is 476 points). A worked example: nodes spread over a region 20 x 15 degrees, with `gridStepDeg` 1, is 300 points, and 300 x 4.2 x 4 = about 5,000 calls a day. Refreshing hourly with GFS would cap you at about 79 points.
+
+If the box has more cells than allowed, the step is doubled (0.5, 1, 2, 4, up to 8 degrees) until it fits, so the map gets coarser rather than the budget being exceeded. If the box needs more than `maxPoints` cells even at 8 degrees (nodes spread over most of the world), the server falls back to the regions around the nodes: the cells that contain a node plus `marginDeg` around each, doubling the step as needed and, at 8 degrees, keeping the cells with the most nodes first, then those closest to a node. It then logs `[ducting] node area too large for maxPoints even at 8 deg; covering the regions around nodes instead` once per refresh.
+
+**How refreshing behaves**
+
+- Against the public API the first fetch starts a random 1 to 5 minutes after the server starts, so a run of restarts, or several instances started together, do not all fetch at once. The call budget is kept in memory only, so every restart begins with a fresh one; the delay spreads those fetches out but does not make them free. With a self-hosted `baseUrl` the first fetch starts at once. After that a fetch runs every `refreshMinutes` (sooner after a failed or incomplete fetch), in the background. Until the first one finishes the overlay says the forecast is being prepared. The browser asks again every minute while it has no forecast, then every 30 minutes; those requests read the server's copy and never reach Open-Meteo.
+- Points are requested in batches of 50; against the public API they are paced to at most 400 calls per minute. Every batch of a fetch asks for the same hours (`start_hour` to `end_hour`, from the hour the fetch started), so a fetch that runs past the top of an hour still lines up.
+- If one batch fails (an HTTP error, a timeout, a bad answer), the others are kept. Its cells keep the previous forecast's values for the hours both forecasts cover (blank beyond that, or when there is no previous forecast), the server logs `[ducting] batch i of n failed, its k cells have no data: ...`, and the refresh line says how many cells were carried over. The server then fetches again after 5 minutes, doubling on repeated incomplete fetches up to `refreshMinutes`, instead of waiting a whole interval; every retry asks for the whole grid and counts against the call budget. If more than half of the batches fail, the server stops asking and the whole refresh counts as failed.
+- If a refresh fails, the last good forecast stays on the map. The server retries with a growing delay, and waits at least an hour after Open-Meteo answers that a rate limit was hit. A rate-limit answer (HTTP 429) ends the fetch at once, whatever batch it comes in.
+- If there is nothing to forecast yet (no `area` and no node position from the last 14 days, or none inside a regional model's coverage), `GET /api/ducting` says `pending`, Open-Meteo is not contacted, and the server looks again every 5 minutes. It logs `[ducting] no grid cells yet ...` once, not on every retry. A forecast already on the map stays there.
+- A forecast counts as expired an hour after its last forecast hour; the API then answers `error` with `forecast expired`.
+- `GET /api/ducting` answers with `Cache-Control: public, max-age=300` when it has a forecast (`ok`), so a CDN or browser may keep it for 5 minutes, and with `no-store` while `pending` or on `error`. An `ok` answer also carries a weak `ETag: W/"<generatedAt>-<model>"` (weak because the gzip and the uncompressed body share it); a request whose `If-None-Match` names it, with or without the `W/` prefix, gets `304 Not Modified` with no body, so a client that already has this forecast does not download it again.
+
+**Self-hosting Open-Meteo**
+
+Follow the upstream documentation at <https://github.com/open-meteo/open-meteo> to run your own instance with the model you chose, then point CoreScope at it. When `baseUrl` is anything other than the public `api.open-meteo.com`, the free-tier call budget does not apply: the 8,000 calls a day limit is not used to lower `maxPoints`, the hourly and daily hard caps are not enforced, and the startup log says `(self-hosted: no call budget)` instead of `(budget cap N)`. Requests are not paced either (the 400 calls per minute pace is for the public API's per-minute limit); a 429 answer is still backed off from.
+
+The check is on the host name in `baseUrl` only. If you put a proxy or cache in front of the **public** API, its `baseUrl` must keep the host name `api.open-meteo.com` (for example by resolving that name to the proxy); under any other name it counts as self-hosted, the call budget is switched off, and the instance can run past Open-Meteo's free limits.
+
+```json
+"ducting": { "enabled": true, "baseUrl": "https://weather.example.org" }
+```
+
+**What is public.** `/api/config/client` tells browsers only the model, its label, the grid step and the attribution text. `baseUrl` is never sent. The forecast cells themselves are public through `GET /api/ducting`.
+
+**How it is calculated (both sources).** For each cell and hour, humidity is turned into water-vapour pressure, then into radio refractivity `N = 77.6 / T x (P + 4810 e / T)` (ITU-R P.453) and modified refractivity `M = N + 0.157 h` (h in metres above ground). Where M decreases with height in the lowest 3 km, the layer traps radio waves. Its thickness `d` (metres) and strength `ΔM` (M units) give the lowest frequency it can trap, `fmin ≈ 120000 / (d x √ΔM)` MHz. The same constant is used for surface-based and elevated ducts: ITU-R P.834 shows that an elevated duct's cutoff depends on the profile below it and can be higher or lower than a surface duct's, so there is no single correction factor, and the model's coarse levels would not support one. A 868 MHz LoRa signal needs `d x √ΔM` of at least about 138, for example a 44 m thick duct with ΔM of 10. The map's colour is the mean gradient of N from the 2 m surface point to 1.5 km above ground; where the profile stops lower (high terrain), from 2 m to its top, if that is at least 1 km up. Each cell is classed as normal, super-refraction (the refractivity gradient reaches -79 N/km or steeper, which stretches range without trapping), elevated duct (the layer starts above the ground) or surface-based duct.
+
+**Limitations (Open-Meteo source).** Say these to your users:
+
+- The model levels are roughly 200 to 250 m apart near the ground, so thinner ducts are invisible. That includes most evaporation ducts over the sea.
+- The grid is tens of kilometres across; a cell says nothing about local terrain or a single link.
+- It is a forecast indicator, not a guarantee that a path will open or stay closed.
+- An elevated duct mostly matters for nodes that sit inside it, such as high sites. A node on the ground below it usually does not benefit.
+
+**Attribution (Open-Meteo source).** Open-Meteo data is CC BY 4.0. The legend shows the required text ("Weather data by Open-Meteo.com (CC BY 4.0)" plus the model name); do not hide it. Weather models: NOAA (GFS, RRFS) and DWD (ICON).
+
 #### Self-hosting tiles
 
 Self-hosting removes the third-party dependency and keeps visitors' requests on your infrastructure. Follow the upstream documentation rather than any steps here:

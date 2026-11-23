@@ -25,6 +25,57 @@ Some maps in the Street group are vector maps, drawn by your browser rather than
 
 Which maps appear in the list is up to the site operator, who can turn groups of maps on and off and add their own tile server. See [Map Tile Providers](../deployment.md#map-tile-providers).
 
+### Tropospheric ducting
+
+When the site operator has turned it on, the layers button has an extra **Tropospheric ducting** checkbox under Overlays (on the Map, Live and Repeater Planner pages). If you do not see it, this site does not offer it.
+
+Ducting is when a layer of air traps radio signals and carries them far beyond the normal range, so a distant node may suddenly be heard. The overlay shows a forecast as colour bands over the area around the mesh. The colour shows the mean refractivity gradient over the lowest 1.5 km of the air: how much the air's refractivity drops per kilometre of height, averaged from the ground up to 1.5 km (in N units per km). The faster it drops, the more signals bend back toward the ground and the further they travel. Normal air drops by about 40 N/km. Each colour is one range of the gradient, not a point on a continuous scale: a whole band has the same colour and the colour changes at the band's edge, so you can read the strength off the legend. The band edges are at -44, -48, -54, -58, -62, -70, -80 and -90 N/km, with no colour above -44. The thresholds were tuned empirically on archived forecast data across several regions.
+
+Colour means more bending than usual, not a confirmed duct. Warm, humid air bends signals more than dry air even without an inversion, so it shows as above normal.
+
+- **No colour**: normal propagation (above -44 N/km).
+- **Purple, blue and cyan**: above normal (-44 to -48, -48 to -54 and -54 to -58 N/km). Signals bend a little more than usual and may reach a little further.
+- **Green, yellow and orange**: high (-58 to -62, -62 to -70 and -70 to -80 N/km). Signals bend noticeably more; the further along the scale, the stronger the effect.
+- **Red and pink**: very high (-80 to -90, and -90 N/km and beyond).
+- A **dashed outline** marks a grid cell where the model finds a trapping layer that may carry this site's LoRa frequency over long distances: its lowest trapped frequency is at most the frequency the operator set for line of sight (`los.frequencyMhz`), or, when the server has none or it was left at its default (910.525 MHz), at most 915 MHz (so 868 or 915 MHz LoRa may be carried). The legend names the frequency it judges. The outline comes from the layers found in the model, not from the colour, so it can sit on any band, or on no colour at all. Treat it as "possible", never "will".
+- With the Open-Meteo source, a faint **dotted line** marks the edge of the forecast area; the global grid has no edge. There is no forecast beyond it, and the colours fade out towards it, so a blank map outside the line means "not covered", not "no ducting".
+- Areas without forecast data are not drawn; the field fades out at their edge.
+
+#### Timeline and history
+
+On sites that use the global grid (the default), the timeline is labelled **Time** and covers the past days the operator keeps (7 by default) and the forecast ahead (48 hours by default), in 3-hour steps; the dashed line on the strip is now, with the past to its left and the forecast to its right. The line above the strip says what you are looking at: a time after now ends in "forecast"; a time before now ends in "analysis, 6 h ago" (or days ago). **Now** goes back to the latest step at or before the current time. Past times show the weather model's analysis or short-range forecast for that time, not measurements. The map shows the whole world, but each view loads only the part you are looking at, and zooming out makes the cells coarser (from 0.5 degrees up to 8). A view that crosses the 180 degree meridian shows only one side of it.
+
+You can share what you see with a link. The page address carries two parameters on the Map, Live and Repeater Planner pages: `duct=1` turns the overlay on for whoever opens the link, and `duct_t=` followed by a time on the timeline (Unix time in seconds, on the hour) shows that time, for example `#/map?duct=1&duct_t=1795053600`. The address updates as you turn the overlay on or off, pick a time or go back to the current one with **Now** (which removes `duct_t`), so copying it from the address bar is enough. A link turns the overlay on for that visit only: it does not change which overlays the browser remembers. A time that is not on the timeline (no longer stored, or not in the forecast) is ignored and the current time is shown, and both parameters are ignored on a site that does not offer the overlay.
+
+#### Observed long links
+
+With the overlay on, the map also draws lines for **observed long links**: two nodes that hear each other directly although there is no line of sight between them. Two kinds of evidence count, and only when the nodes are certain: a node heard by an observer with no relay in between (a zero-hop advert), and two repeaters in a relayed path whose short IDs each match exactly one node (origin to first relay, and relay to relay). Clicking a line says which kind each reception was; relayed ones have no signal strength.
+
+"No line of sight" is decided from terrain when the site has line-of-sight terrain turned on, otherwise from the antennas' heights alone (the radio horizon). Heights are the ones users entered for their repeaters where the site has them, otherwise the site's default antenna height. Links over 1,000 km are dropped as probably wrong positions. A pair the site has not checked yet is left out and counted in the legend as "not checked yet".
+
+Only links heard within 90 minutes of the selected time are drawn, so moving through the timeline moves the set. Click a line for the two nodes, the distance, and the recent receptions (one per 3-hour step) with the modelled gradient along the path.
+
+- A **solid line in the highlight colour**: half or more of the path was in the High band (-62 N/km or stronger) in the model.
+- A **solid line in the other colour**: less of the path was in the High band.
+- A **dashed line**: no model data for that time.
+
+The legend adds a summary for the period, for example "Last 7 days: 40 receptions on the 9 longest node pairs without terrain line of sight. Along their paths the modelled refractivity gradient averaged -45 N/km when heard, against -44 N/km for the same paths over the whole period". Read each pair of numbers together: the second is the same paths at every time in the period, so the first only matters if it is clearly more negative.
+
+Below it, a table gives **how often the pairs were heard, by path gradient**: for each band of the modelled gradient along the path, the share of 3-hour steps in which the pair was heard (n is the number of pair-steps). If ducting matters, the share would rise towards the High band. The second column is for intermittent pairs only, those heard in some but not nearly all of their steps. This is the column to look at, because a pair that is heard almost every time is heard whatever the weather and says nothing about it.
+
+How to read it honestly:
+
+- A flat table means no visible link between the modelled gradient and being heard. A rising one is a hint, not proof.
+- The model has 0.5 degree cells and levels about 200 m apart, so thin ducts are invisible. A low share in the High band does not mean no duct.
+- Positions are self-reported; a wrong position makes a link look long.
+- Where antennas are higher than the default height, "no line of sight" can be wrong, and where the site has no terrain data it ignores hills. Either way the list may contain pairs that did have line of sight, or miss some that did not.
+
+Hidden and blacklisted nodes and observers never appear. The colours of the bands, outline, edge and links can be changed in the customizer under **Ducting overlay**.
+
+The legend shows the same bands as a bar, labelled Normal, Above normal, High and Very high. Pick the time on the timeline under the panel's title (**Time** on the global grid, see above; **Forecast time** with the Open-Meteo source): the time under the centre marker is the one shown, with the date and hour written above it. Scroll or drag the strip (a mouse wheel scrolls it too), click a time, use ◀ and ▶ to step to the previous or next time, or focus the strip and use the arrow keys (Page Up / Page Down jump a day, Home / End go to the first and last time). **Now** jumps back to the current time; until you pick a time yourself, the shown time moves on with the clock (at the top of each hour with the Open-Meteo source, as each 3-hour step begins on the global grid). A line under the time says when the forecast is still being prepared, is unavailable, or is out of date (the last one received stays on the map), or, on the global grid, that the data for the area in view could not be loaded. The chevron in the panel's title bar collapses the legend, observed long links included (the timeline and that line stay), and on a larger screen you can drag the panel by its grip to anywhere on the map (**Reset** puts it back in the corner); both are remembered on this device. Click anywhere in the field for the details of that grid cell: the gradient over the lowest 1.5 km, the type of layer found in the model (normal, super-refraction, elevated duct or surface-based duct), base and top of the layer (metres above ground), strength, the lowest trapped frequency ("≈ … MHz (model estimate)", to two significant figures) and a LoRa verdict for each frequency judged (this site's, or 868 and 915 MHz separately): "LoRa … MHz: possibly trapped (model estimate)" or "not trapped by this layer". The verdict compares the rounded figure shown, so within a few MHz of the frequency the answer is decided by rounding, not by the data. For a duct, the popup also notes that the model's levels are about 200 m apart, so thinner layers are not resolved. An elevated duct is a layer above the ground and mostly helps nodes that sit inside it, such as repeaters on high sites; a surface-based duct reaches the ground. The legend also shows the weather model, the data attribution and when the data was last updated.
+
+It is an indicator only, and the LoRa verdict is an estimate. The model's levels are about 200-250 m apart, so the ducts it can see are thick ones. The thin ducts that most often carry 868 MHz, for example evaporation ducts over the sea, are mostly invisible to it. Each grid cell also covers tens of kilometres (0.5 degrees is about 55 km north to south): the band edges are interpolated between cell centres and show no detail finer than that. A clear map does not mean no long-distance reception, and a coloured or outlined area does not promise it. See also [Why did a node far away hear my packet?](faq.md#12-why-did-a-node-far-away-hear-my-packet)
+
 ## Marker shapes and colors
 
 Each node role has a distinct shape and color:

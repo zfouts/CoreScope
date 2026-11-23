@@ -752,6 +752,13 @@ func main() {
 	defer stopNeighborBuilder()
 	log.Printf("[neighbor-build] enabled (interval=%s)", NeighborEdgesBuilderInterval)
 
+	// Global ducting grid (ducting.source "gfs-grid"): NOAA GFS -> physics ->
+	// ducting_grid, one row per forecast step (ducting_grid_job.go).
+	if cfg.DuctingGridEnabled() {
+		stopDuctingGrid := startDuctingGridJob(cfg.Ducting, store)
+		defer stopDuctingGrid()
+	}
+
 	// #1212: per-source stall watchdog. Detects "silently dead" sources
 	// where the client reports connected but no messages have flowed. Logs
 	// a WARN line every minute for any source silent for >5m. Scan every

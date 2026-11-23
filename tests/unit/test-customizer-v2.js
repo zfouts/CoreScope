@@ -704,6 +704,23 @@ test('_gfReapply: prune follows the saved polygon, not unsaved drawing', () => {
   assert.strictEqual(c.els['#cv2-gf-prune-section'].style.display, 'none');
 });
 
+test('ducting colours are in THEME_CSS_MAP and fall back to the stylesheet value', () => {
+  const { ctx, api } = loadCustomizer();
+  for (const k of ['ductS1', 'ductS8', 'ductLora', 'ductEdge', 'ductLink', 'ductLinkDuct', 'ductLinkCasing']) {
+    assert.ok(/^--mc-duct-/.test(api.THEME_CSS_MAP[k]), k + ' mapped');
+  }
+  assert.strictEqual(api.THEME_CSS_MAP.ductAlpha, undefined, 'opacity is not a colour');
+  const vals = { '--mc-duct-s1': ' #1A2b3C', '--mc-duct-edge': 'rgba(120, 130, 140, 0.6)', '--mc-duct-lora': '#abc' };
+  ctx.getComputedStyle = () => ({ getPropertyValue: (n) => vals[n] || '' });
+  assert.strictEqual(api.cssVarHex('--mc-duct-s1'), '#1a2b3c');
+  assert.strictEqual(api.cssVarHex('--mc-duct-edge'), '#78828c');
+  assert.strictEqual(api.cssVarHex('--mc-duct-lora'), '#aabbcc');
+  assert.strictEqual(api.cssVarHex('--mc-duct-link'), '');
+  assert.strictEqual(api.cssVarHex(''), '');
+  ctx.getComputedStyle = () => { throw new Error('no style'); };
+  assert.strictEqual(api.cssVarHex('--mc-duct-s1'), '');
+});
+
 // ── Summary ──
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`);
 process.exit(failed > 0 ? 1 : 0);

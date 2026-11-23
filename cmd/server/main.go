@@ -517,6 +517,24 @@ func main() {
 	// answers 404, without planner.enabled /api/planner/* does, and with
 	// neither no terrain tile is ever fetched.
 	srv.elevation, srv.planner = newTerrainServices(cfg, srv)
+	logDuctingConfig(cfg.Ducting)
+
+	// Tropospheric ducting overlay. OPT-IN: without ducting.enabled every
+	// /api/ducting* route answers 404 and nothing is fetched or read.
+	// source gfs-grid (default): the global grid the ingestor stores, served
+	// from the DB on demand (ducting_grid_service.go; no background work).
+	// source open-meteo: the per-point Open-Meteo fetcher (ducting_service.go).
+	if cfg.Ducting.enabled() {
+		if cfg.Ducting.source() == ductingSourceOpenMeteo {
+			srv.ducting = newDuctingService(cfg.Ducting, srv.ductingNodes)
+			dCtx, stopDucting := context.WithCancel(context.Background())
+			srv.ducting.run(dCtx)
+			defer stopDucting()
+		} else {
+			srv.ductingGrid = newDuctingGridService(srv.db, cfg)
+			srv.ductingLinks = newDuctingLinksState()
+		}
+	}
 
 	// Steady-state repeater-enrichment recomputer (issue #1262).
 	// Prewarms the bulk caches feeding handleNodes so the very first

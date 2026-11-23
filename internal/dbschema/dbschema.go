@@ -121,6 +121,9 @@ func Apply(rw *sql.DB, logf Logger) error {
 	if err := ensureObserverNeighborReports(rw); err != nil {
 		return fmt.Errorf("ensure observer neighbor reports: %w", err)
 	}
+	if err := ensureDuctingGrid(rw); err != nil {
+		return fmt.Errorf("ensure ducting_grid: %w", err)
+	}
 	// Must run LAST: the ensureObserver*Column steps above bring a legacy
 	// observers table up to the canonical columns the rebuild copies.
 	if err := ensureObserversIdx(rw, logf); err != nil {

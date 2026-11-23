@@ -46,13 +46,15 @@
  *
  * Overlay entry (new; window.MC_TILE_OVERLAYS[id]), stacked above any base:
  *   provider, label, attribution, maxZoom, maxNativeZoom, subdomains, optIn
- *   kind     'raster' | 'hillshade'
+ *   kind     'raster' | 'hillshade' | 'ducting'
  *   url      raster: XYZ template; hillshade: Terrarium-encoded elevation PNG
  *            template (elevation m = R*256 + G + B/256 - 32768)
  *   opacity  number 0-1 (default 1; hillshade default 0.35)
  *   zIndex   number (default 250, above tiles 200, below overlayPane 400)
  *   Overlays are off until the viewer ticks them; the ticked set persists in
  *   localStorage 'mc-tile-overlays' (JSON array of ids).
+ *   MC_attachAutoTiles(map, { viewOverlays: [id] }) also shows overlays for
+ *   one page view without saving them (a deep link, #2459).
  *
  * MC_resolveTile(isDark) descriptor gains: format, category, maxNativeZoom,
  *   subdomains (existing fields unchanged).
@@ -514,11 +516,27 @@
     return _hillshade;
   }
 
+  // The tropospheric-ducting overlay: only when the server enabled it
+  // (window.MC_DUCTING_CFG, set from /api/config/client). It has no url; the
+  // data layer (map-ducting.js) fetches /api/ducting itself. Same attribution
+  // -> same entry object, so maps keep their layer across registry rebuilds.
+  var _ducting = null;
+  function _ductingEntry() {
+    var c = window.MC_DUCTING_CFG;
+    var attr = (c && typeof c.attribution === 'string') ? c.attribution : '';
+    if (_ducting && _ducting.attribution === attr) return _ducting;
+    _ducting = { provider: 'ducting', kind: 'ducting', label: 'Tropospheric ducting',
+      attribution: attr, maxZoom: _DEFAULT_MAX_ZOOM, opacity: 1, zIndex: OVERLAY_Z + 10 };
+    return _ducting;
+  }
+
   // Rebuilds window.MC_TILE_OVERLAYS: hillshade (only while map-hillshade.js
-  // has defined MC_createHillshadeLayer), the EOX labels, then custom ones.
+  // has defined MC_createHillshadeLayer), ducting (only when the server
+  // config enables it), the EOX labels, then custom ones.
   function _buildOverlays() {
     var o = {};
     if (typeof window.MC_createHillshadeLayer === 'function' && _groupOn('hillshade')) o.hillshade = _hillshadeEntry();
+    if (window.MC_DUCTING_CFG) o.ducting = _ductingEntry();
     for (var k in OVERLAY_STYLES) {
       if (_groupOn(OVERLAY_STYLES[k].provider)) o[k] = OVERLAY_STYLES[k];
     }
@@ -997,6 +1015,13 @@
    */
   window.MC_buildOverlayLayer = function (overlay, opts) {
     opts = opts || {};
+    // Ducting draws its own field from /api/ducting: no url and no tile
+    // overlay pane (it makes its own panes; clicks reach it through one map
+    // click handler).
+    if (overlay && overlay.kind === 'ducting') {
+      if (typeof window.MC_createDuctingLayer !== 'function') return null;
+      try { return window.MC_createDuctingLayer(overlay) || null; } catch (_) { return null; }
+    }
     if (!overlay || typeof overlay.url !== 'string') return null;
     var o = {
       attribution: overlay.attribution || '',
@@ -1350,7 +1375,14 @@
         map._mcOverlayHandler = function (e) {
           var ids = _control && _control._mcOverlayIds;
           if (!e || !ids || overlaySet.busy() || !_inSet(ids, e.name)) return;
-          window.MC_setTileOverlay(e.name, e.type === 'overlayadd');
+          var on = e.type === 'overlayadd';
+          overlaySet.unview(e.name);   // the user's choice replaces a link's
+          window.MC_setTileOverlay(e.name, on);
+          // A layer that keeps its state in the URL hears the user's toggles
+          // here, the only place they are told apart from the set's own.
+          if (e.layer && typeof e.layer.mcUserToggle === 'function') {
+            try { e.layer.mcUserToggle(on); } catch (_) {}
+          }
         };
         map.on('overlayadd', map._mcOverlayHandler);
         map.on('overlayremove', map._mcOverlayHandler);
@@ -1403,7 +1435,8 @@
 
   // ── Overlay preference + per-map overlay set ────────────────────────────
   // The ticked overlays are a per-browser preference shared by every map
-  // (like the provider pick), so they are not put in the URL hash.
+  // (like the provider pick), so they are not put in the URL hash. A link
+  // can still show one for a single page view (viewOverlays), unsaved.
 
   var _overlaysMemo = null;      // last value written, for when localStorage throws
   var _overlaysUnsaved = false;  // the last write failed: _overlaysMemo is newer than storage
@@ -1490,10 +1523,20 @@
 
   // One map's overlay layers, kept in line with the shared preference.
   // Layers are built once per registry entry and reused by the picker.
-  function _overlaySet(map) {
+  // viewIds: overlays shown on this map whatever the preference says (a deep
+  // link), without saving them. The user's own tick or untick of one ends it.
+  function _overlaySet(map, viewIds) {
     var built = {};   // id -> { entry, layer }
     var busy = false; // true while this set adds/removes layers itself
     var pane = _overlayPane(map);
+    var view = [];    // ids, at most one per entry of viewIds
+    if (Array.isArray(viewIds)) {
+      viewIds.forEach(function (id) { if (typeof id === 'string' && view.indexOf(id) < 0) view.push(id); });
+    }
+    function unview(id) {
+      var at = view.indexOf(id);
+      if (at >= 0) view.splice(at, 1);
+    }
 
     function drop(id) {
       try { map.removeLayer(built[id].layer); } catch (_) {}
@@ -1539,6 +1582,8 @@
       _ensureHillshade();
       var want = {};
       _readOverlays().forEach(function (id) { want[id] = true; });
+      // An id the registry does not have (yet: the config may still bring it) waits.
+      view.forEach(function (id) { if (_hasOverlay(id)) want[id] = true; });
       busy = true;
       try {
         Object.keys(built).forEach(function (id) {
@@ -1581,7 +1626,7 @@
       busy = false;
     }
 
-    return { layers: layers, sync: sync, destroy: destroy, busy: function () { return busy; } };
+    return { layers: layers, sync: sync, destroy: destroy, unview: unview, busy: function () { return busy; } };
   }
 
 
@@ -1625,8 +1670,11 @@
    * and empty until Auto is shown (#2444).
    *
    * @param {L.Map} map
-   * @param {{controlPosition?: string}} [opts] - controlPosition adds the
-   *   MC_createLayerControl provider picker at that corner.
+   * @param {{controlPosition?: string, viewOverlays?: string[]}} [opts] -
+   *   controlPosition adds the MC_createLayerControl provider picker at that
+   *   corner. viewOverlays (with a picker only): overlay ids shown on this
+   *   map for this page view whatever the saved preference says, and never
+   *   saved (a deep link, #2459); ids that are not registered are ignored.
    * @returns {{group: L.LayerGroup, sync: function(), destroy: function()}}
    */
   window.MC_attachAutoTiles = function (map, opts) {
@@ -1645,7 +1693,7 @@
     var lc = null;
     // Overlays come with the picker: surfaces without one (node maps,
     // analytics, home, customizer) show none.
-    var overlays = opts.controlPosition ? _overlaySet(map) : null;
+    var overlays = opts.controlPosition ? _overlaySet(map, opts.viewOverlays) : null;
     // Marks this map's tile pane as having a picker: its Auto filter (like
     // its Auto layer) ignores the pin.
     if (opts.controlPosition) {

@@ -117,6 +117,10 @@ type Config struct {
 	// ingestor reads: where users.db is and whether approved hashtag channels
 	// are decrypted. Everything else in the block belongs to the server.
 	UserManagement *UserManagementConfig `json:"userManagement,omitempty"`
+
+	// Ducting is the part of the shared ducting block the ingestor reads:
+	// the global GFS grid job (ducting_grid_config.go).
+	Ducting *DuctingConfig `json:"ducting,omitempty"`
 }
 
 // NeighborEdgesDaysOrDefault returns the configured pruning window or 5.

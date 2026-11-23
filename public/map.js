@@ -676,7 +676,8 @@
     targetNodeKey = urlParams.get('node') || null;
 
     // Shared theme-synced basemap + provider picker (map-tile-providers.js).
-    autoTiles = window.MC_attachAutoTiles(map, { controlPosition: 'topleft' });
+    // A link's duct=1 / duct_t shows the ducting overlay for this view only (#2459).
+    autoTiles = window.MC_attachAutoTiles(map, { controlPosition: 'topleft', viewOverlays: window.MC_ductLinkOverlays ? window.MC_ductLinkOverlays() : [] });
 
     // #1689 r1 (adv #4): live re-render when the customizer "hide 1-byte
     // path hops" toggle flips. Before this listener the toggle only took

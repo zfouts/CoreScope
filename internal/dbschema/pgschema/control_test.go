@@ -98,13 +98,13 @@ func TestControlMigrationFreshAndFromV1(t *testing.T) {
 	if err := Apply(ctx, v1, rec.logf); err != nil {
 		t.Fatalf("Apply on a v1 schema: %v", err)
 	}
-	if n, m, h := rec.count("applied migration"), rec.count("0002_control.sql"), rec.count("0003_control_hardening.sql"); n != 2 || m != 1 || h != 1 {
-		t.Errorf("upgrade from v1 logged %d applications (%d of 0002, %d of 0003), want 0002 and 0003: %v", n, m, h, rec.lines)
+	if n, m, h := rec.count("applied migration"), rec.count("0002_control.sql"), rec.count("0003_control_hardening.sql"); n != 3 || m != 1 || h != 1 {
+		t.Errorf("upgrade from v1 logged %d applications (%d of 0002, %d of 0003), want 0002, 0003 and 0004: %v", n, m, h, rec.lines)
 	}
 
 	for name, db := range map[string]*sql.DB{"fresh": fresh, "from v1": v1} {
-		if got := versionRows(t, db); len(got) != 3 || got[2] != 3 {
-			t.Errorf("%s: schema_version = %v, want [1 2 3]", name, got)
+		if got := versionRows(t, db); len(got) != 4 || got[3] != 4 {
+			t.Errorf("%s: schema_version = %v, want [1 2 3 4]", name, got)
 		}
 		if !relationExists(t, db, "ingestor_stats") {
 			t.Errorf("%s: ingestor_stats missing", name)

@@ -713,6 +713,10 @@
 
   // ─── Hash params ────────────────────────────────────────────────────────
 
+  // Parameters of the page's map, not of a planner mode: the ducting overlay
+  // link (#2459, written by map-ducting.js).
+  var PAGE_PARAMS = ['duct', 'duct_t'];
+
   function isPlannerHash(h) { return /^#\/tools\/planner(\?|$)/.test(String(h || '')); }
 
   function params() { return queryOf(location.hash); }
@@ -959,7 +963,8 @@
     var map = L.map(S.els.map, { zoomControl: true, worldCopyJump: true });
     S.map = map;
     map.setView(FALLBACK_VIEW.center, FALLBACK_VIEW.zoom);
-    S.tiles = window.MC_attachAutoTiles(map, { controlPosition: 'topleft' });
+    // A link's duct=1 / duct_t shows the ducting overlay for this view only (#2459).
+    S.tiles = window.MC_attachAutoTiles(map, { controlPosition: 'topleft', viewOverlays: window.MC_ductLinkOverlays ? window.MC_ductLinkOverlays() : [] });
 
     // Nodes sit in their own pane under the overlay pane, so legs always draw on top.
     map.createPane('mc-pl-nodes');
@@ -1318,16 +1323,19 @@
     if (MODES.indexOf(mode) < 0) mode = 'chain';
     var prev = S.mode;
     if (prev === mode) return;
+    // The map's own parameters stay in the hash across modes; the rest is
+    // the mode's, put away with it and brought back when it returns.
+    var all = params(), page = {};
+    PAGE_PARAMS.forEach(function (k) { if (hasOwn(all, k)) { page[k] = all[k]; delete all[k]; } });
     if (prev) {
-      var keep = params();
-      delete keep.mode;
-      S.modeParams[prev] = keep;
+      delete all.mode;
+      S.modeParams[prev] = all;
       leaveMode(prev);
     }
     closePanel({ restoreFocus: false });
     S.mode = mode;
     if (opts.initial) setParams({ mode: mode });
-    else replaceHash(BASE_HASH + buildQuery(MODULES[mode] ? Object.assign({ mode: mode }, S.modeParams[mode] || {}) : { mode: mode }));
+    else replaceHash(BASE_HASH + buildQuery(Object.assign({ mode: mode }, MODULES[mode] ? S.modeParams[mode] : null, page)));
     MODES.forEach(function (m, i) {
       var on = m === mode;
       var tab = S.els.tabs[i];

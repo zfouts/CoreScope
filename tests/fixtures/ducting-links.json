@@ -1,0 +1,209 @@
+{
+ "status": "ok",
+ "freqMHz": 869.525,
+ "days": 7,
+ "generatedAt": 1795046340,
+ "summary": {
+  "links": 4,
+  "receptions": 6,
+  "withGrid": 5,
+  "duringDuct": 2,
+  "baselineDuctFrac": 0.23,
+  "unverifiedPairs": 3,
+  "recvMeanGradNkm": -58.4,
+  "baselineMeanGradNkm": -49.2,
+  "recvEnhancedFrac": 0.41,
+  "baselineEnhancedFrac": 0.22,
+  "byGradient": [
+   {
+    "fromNkm": null,
+    "toNkm": -40,
+    "pathSteps": 1200,
+    "heardSteps": 96
+   },
+   {
+    "fromNkm": -40,
+    "toNkm": -50,
+    "pathSteps": 2410,
+    "heardSteps": 241
+   },
+   {
+    "fromNkm": -50,
+    "toNkm": -62,
+    "pathSteps": 830,
+    "heardSteps": 125
+   },
+   {
+    "fromNkm": -62,
+    "toNkm": null,
+    "pathSteps": 160,
+    "heardSteps": 51
+   }
+  ],
+  "intermittentPairs": 2,
+  "byGradientIntermittent": [
+   {
+    "fromNkm": null,
+    "toNkm": -40,
+    "pathSteps": 310,
+    "heardSteps": 9
+   },
+   {
+    "fromNkm": -40,
+    "toNkm": -50,
+    "pathSteps": 402,
+    "heardSteps": 30
+   },
+   {
+    "fromNkm": -50,
+    "toNkm": -62,
+    "pathSteps": 0,
+    "heardSteps": 0
+   },
+   {
+    "fromNkm": -62,
+    "toNkm": null,
+    "pathSteps": 44,
+    "heardSteps": 15
+   }
+  ]
+ },
+ "links": [
+  {
+   "a": {
+    "pubkey": "aa11",
+    "name": "Hill Top",
+    "lat": 51.2,
+    "lon": -0.5,
+    "heightM": 12,
+    "heightKnown": true
+   },
+   "b": {
+    "pubkey": "bb22",
+    "name": "<img src=x onerror=alert(1)>",
+    "lat": 52.8,
+    "lon": 0.7,
+    "heightM": 10,
+    "heightKnown": false
+   },
+   "distKm": 190.4,
+   "horizonKm": 59.3,
+   "count": 3,
+   "receptions": [
+    {
+     "t": 1795047000,
+     "snr": -5.5,
+     "rssi": -118,
+     "ductFrac": 0.8,
+     "superFrac": 0.8,
+     "via": "observer",
+     "meanGradNkm": -62.3,
+     "highFrac": 0.75
+    },
+    {
+     "t": 1795026400,
+     "via": "relay",
+     "ductFrac": 0.1,
+     "superFrac": 0.2,
+     "meanGradNkm": -45.6,
+     "highFrac": 0.1
+    }
+   ]
+  },
+  {
+   "a": {
+    "pubkey": "cc33",
+    "name": "Coast",
+    "lat": 51.4,
+    "lon": -0.9,
+    "heightM": 8,
+    "heightKnown": true
+   },
+   "b": {
+    "pubkey": "dd44",
+    "name": "Ridge",
+    "lat": 52.6,
+    "lon": -0.2,
+    "heightM": 30,
+    "heightKnown": true
+   },
+   "distKm": 142,
+   "horizonKm": 34.2,
+   "count": 1,
+   "receptions": [
+    {
+     "t": 1795044600,
+     "via": "relay",
+     "ductFrac": 0,
+     "superFrac": 0.95,
+     "meanGradNkm": -47,
+     "highFrac": 0.2
+    }
+   ]
+  },
+  {
+   "a": {
+    "pubkey": "ee55",
+    "name": "",
+    "lat": 51.1,
+    "lon": 0.9,
+    "heightM": 10,
+    "heightKnown": false
+   },
+   "b": {
+    "pubkey": "ff66",
+    "name": "Mast",
+    "lat": 51.9,
+    "lon": 0.1,
+    "heightM": 40,
+    "heightKnown": true
+   },
+   "distKm": 105,
+   "horizonKm": 39,
+   "count": 1,
+   "receptions": [
+    {
+     "t": 1795051800,
+     "rssi": -125,
+     "ductFrac": -1,
+     "superFrac": -1,
+     "via": "observer",
+     "meanGradNkm": null,
+     "highFrac": -1
+    }
+   ]
+  },
+  {
+   "a": {
+    "pubkey": "0a0b",
+    "name": "Late",
+    "lat": 51.6,
+    "lon": -0.6,
+    "heightM": 10,
+    "heightKnown": true
+   },
+   "b": {
+    "pubkey": "0c0d",
+    "name": "Later",
+    "lat": 52.9,
+    "lon": 0.4,
+    "heightM": 10,
+    "heightKnown": true
+   },
+   "distKm": 160,
+   "horizonKm": 26,
+   "count": 1,
+   "receptions": [
+    {
+     "t": 1795051801,
+     "ductFrac": 0,
+     "superFrac": 0.9,
+     "via": "observer",
+     "meanGradNkm": -70,
+     "highFrac": 0.9
+    }
+   ]
+  }
+ ],
+ "losMethod": "terrain"
+}

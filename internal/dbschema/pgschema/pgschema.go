@@ -25,7 +25,7 @@ import (
 )
 
 // LatestVersion is the highest migration version shipped.
-const LatestVersion = 3
+const LatestVersion = 4
 
 // minServerMajor is the oldest Postgres major version CoreScope supports.
 const minServerMajor = 16
