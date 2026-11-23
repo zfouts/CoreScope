@@ -615,3 +615,88 @@ func TestLocationPrivacySecretNeverSerialised(t *testing.T) {
 		t.Errorf("block JSON %s", b)
 	}
 }
+
+func TestLocationPrivacyFailClosed(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	withBlock := write("with.json", `{"locationPrivacy": {"enabled": true, "secret": "`+testLocSecret+`"`)
+	without := write("without.json", `{"port": 3000,`)
+	missing := filepath.Join(dir, "missing.json")
+	parseErr := json.Unmarshal([]byte(`{"port": 3000,`), &Config{})
+	noEnv := func(string) string { return "" }
+	env := func(k string) string {
+		if k == locationSecretEnv {
+			return strings.Repeat("e", 40)
+		}
+		return ""
+	}
+	cases := []struct {
+		name    string
+		loadErr error
+		path    string
+		getenv  func(string) string
+		want    bool
+	}{
+		{"parse error, block present", parseErr, withBlock, noEnv, true},
+		{"parse error, env secret set", parseErr, without, env, true},
+		{"parse error, env set, file missing", parseErr, missing, env, true},
+		{"parse error, no mention", parseErr, without, noEnv, false},
+		{"no parse error, block present", nil, withBlock, env, false},
+		{"parse error, file missing", parseErr, missing, noEnv, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := locationPrivacyFailClosed(tc.loadErr, tc.path, tc.getenv)
+			if (err != nil) != tc.want {
+				t.Fatalf("got %v, want refusal=%v", err, tc.want)
+			}
+			if err != nil {
+				if !strings.Contains(err.Error(), "refusing to start with exact positions") {
+					t.Fatalf("message %q", err)
+				}
+				if strings.Contains(err.Error(), testLocSecret) || strings.Contains(err.Error(), "eeee") || strings.Contains(err.Error(), "locationPrivacy\"") {
+					t.Fatalf("message leaks secret or file contents: %q", err)
+				}
+			}
+		})
+	}
+}
+
+// loadConfigReport reports the broken files LoadConfig skips, including one
+// skipped in favour of data/config.json, so main can fail closed on them.
+func TestLocationPrivacyLoadConfigReportsParseFailures(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "data"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	broken := filepath.Join(dir, "config.json")
+	os.WriteFile(broken, []byte(`{"locationPrivacy": {"enabled": true,}`), 0600)
+	os.WriteFile(filepath.Join(dir, "data", "config.json"), []byte(`{"port": 4321}`), 0600)
+	cfg, failures := loadConfigReport(dir)
+	if cfg.Port != 4321 || cfg.LocationPrivacy != nil {
+		t.Fatalf("fallback config not used: port %d", cfg.Port)
+	}
+	if len(failures) != 1 || failures[0].Path != broken || failures[0].Err == nil {
+		t.Fatalf("failures %+v", failures)
+	}
+	if err := locationPrivacyFailClosed(failures[0].Err, failures[0].Path, func(string) string { return "" }); err == nil {
+		t.Fatal("broken config with a locationPrivacy block did not refuse")
+	}
+	// LoadConfig keeps its old contract: no error, same config.
+	if c, err := LoadConfig(dir); err != nil || c.Port != 4321 {
+		t.Fatalf("LoadConfig: %v port %d", err, c.Port)
+	}
+	if got := configCandidatePaths(dir); len(got) != 2 || got[0] != broken {
+		t.Fatalf("candidate paths %v", got)
+	}
+	// A clean directory reports nothing.
+	if _, f := loadConfigReport(t.TempDir()); len(f) != 0 {
+		t.Fatalf("failures for no config: %+v", f)
+	}
+}

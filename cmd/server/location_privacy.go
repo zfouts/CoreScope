@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
@@ -333,6 +334,27 @@ func avoidNullIsland(lat, lon float64) (float64, float64) {
 		return locNullEps, lon
 	}
 	return lat, lon
+}
+
+// locationPrivacyFailClosed decides whether a config file that could not be
+// parsed (loadErr, at cfgPath) must stop the server: it must when location
+// privacy was evidently intended, i.e. the secret environment variable is
+// set or the file mentions "locationPrivacy". Otherwise (no parse error, a
+// missing or unreadable file, no mention) it returns nil and startup goes on
+// as before. The error never contains the secret or the file contents.
+func locationPrivacyFailClosed(loadErr error, cfgPath string, getenv func(string) string) error {
+	if loadErr == nil {
+		return nil
+	}
+	intended := getenv(locationSecretEnv) != ""
+	if !intended {
+		data, err := os.ReadFile(cfgPath)
+		intended = err == nil && bytes.Contains(data, []byte("locationPrivacy"))
+	}
+	if !intended {
+		return nil
+	}
+	return fmt.Errorf("config.json could not be parsed and location privacy appears configured; refusing to start with exact positions: %w", loadErr)
 }
 
 // Enabled reports whether positions are fuzzed.

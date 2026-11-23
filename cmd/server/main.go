@@ -101,9 +101,14 @@ func main() {
 	flag.Parse()
 
 	// Load config
-	cfg, err := LoadConfig(configDir)
-	if err != nil {
-		log.Printf("[config] warning: %v (using defaults)", err)
+	cfg, cfgFailures := loadConfigReport(configDir)
+	for _, cf := range cfgFailures {
+		log.Printf("[config] warning: %s could not be parsed (skipped): %v", cf.Path, cf.Err)
+		// A broken config.json falls back to the next file or the defaults,
+		// which would silently serve exact positions.
+		if err := locationPrivacyFailClosed(cf.Err, cf.Path, os.Getenv); err != nil {
+			log.Fatalf("[privacy] %v", err)
+		}
 	}
 	// Location privacy (location_privacy.go): an enabled block with a short
 	// secret or an out-of-range radius never starts. The error never
