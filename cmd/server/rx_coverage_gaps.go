@@ -88,8 +88,8 @@ func aggregateGaps(track []trackPoint, receptions []coverageRow, res int) (gaps 
 // companion was connected there. Read-only. With location privacy on, the
 // points are privacy cell centres and the bbox applies to those.
 func (s *Server) queryTrackPoints(rx string, days int, b bbox) ([]trackPoint, error) {
-	radius := s.cfg.LocationFuzzer().RadiusM()
-	qb := b.widenForFixCells(radius)
+	grid := fixGridFor(s.cfg.LocationFuzzer())
+	qb := b.widenForFixCells(grid)
 	where := []string{"lat BETWEEN ? AND ?", "lon BETWEEN ? AND ?", "stationary = 0"}
 	args := []interface{}{qb.MinLat, qb.MaxLat, qb.MinLon, qb.MaxLon}
 	if rx != "" {
@@ -116,8 +116,5 @@ func (s *Server) queryTrackPoints(rx string, days int, b bbox) ([]trackPoint, er
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if radius > 0 {
-		out = binFixesInBBox(out, radius, b, func(p *trackPoint) (*float64, *float64) { return &p.Lat, &p.Lon })
-	}
-	return out, nil
+	return binFixesInBBox(out, grid, b, func(p *trackPoint) (*float64, *float64) { return &p.Lat, &p.Lon }), nil
 }

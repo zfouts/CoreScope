@@ -1,6 +1,6 @@
 package main
 
-// Location privacy for companion GPS fixes (hexgrid.go: fixCellCentre,
+// Location privacy for companion GPS fixes (hexgrid.go: fixGrid,
 // maxHexResForRadius): every route built on client_receptions /
 // client_rf_samples serves cells no smaller than the radius, filters on cell
 // centres and measures from them.
@@ -20,7 +20,12 @@ const cellTestRadiusM = 1000.0
 
 func cellTestFuzzer(t *testing.T, radiusM float64) *locationFuzzer {
 	t.Helper()
-	f, err := newLocationFuzzer(&LocationPrivacyConfig{Enabled: true, RadiusM: radiusM, Secret: strings.Repeat("cells-test-secret-", 3)})
+	return cellTestFuzzerWith(t, radiusM, strings.Repeat("cells-test-secret-", 3))
+}
+
+func cellTestFuzzerWith(t *testing.T, radiusM float64, secret string) *locationFuzzer {
+	t.Helper()
+	f, err := newLocationFuzzer(&LocationPrivacyConfig{Enabled: true, RadiusM: radiusM, Secret: secret})
 	if err != nil || f == nil {
 		t.Fatalf("newLocationFuzzer: %v", err)
 	}
@@ -84,43 +89,107 @@ func TestHexResForRadius(t *testing.T) {
 }
 
 func TestFixCellCentre(t *testing.T) {
-	if la, lo := fixCellCentre(0, 37.445987, -122.161728); la != 37.445987 || lo != -122.161728 {
-		t.Fatalf("radius 0 must be the identity, got %v,%v", la, lo)
+	var off *fixGrid
+	if la, lo := off.centre(37.445987, -122.161728); la != 37.445987 || lo != -122.161728 {
+		t.Fatalf("nil grid must be the identity, got %v,%v", la, lo)
+	}
+	if fixGridFor(nil) != nil || off.RadiusM() != 0 {
+		t.Fatal("no fuzzer must mean no grid")
 	}
 	rng := rand.New(rand.NewSource(11))
 	for _, r := range []float64{100, 1000, 50000} {
-		h := fixCellFrac * r / locMetresPerDeg
+		g := fixGridFor(cellTestFuzzer(t, r))
+		if g.fLat < 0 || g.fLat >= 1 || g.fLon < 0 || g.fLon >= 1 {
+			t.Fatalf("offsets %v, %v outside [0, 1)", g.fLat, g.fLon)
+		}
 		for i := 0; i < 2000; i++ {
 			lat := (rng.Float64()*2 - 1) * 89
 			lon := rng.Float64()*360 - 180
-			cl, co := fixCellCentre(r, lat, lon)
+			cl, co := g.centre(lat, lon)
 			if cl == 0 && co == 0 {
 				t.Fatalf("centre (0,0) reads as no fix")
 			}
-			if co < -180 || co >= 180 || math.Abs(cl-lat) > h/2+1e-9 {
+			if co < -180 || co >= 180 || math.Abs(cl-lat) > g.h/2+1e-9 {
 				t.Fatalf("r=%v %v,%v → centre %v,%v outside the row", r, lat, lon, cl, co)
 			}
 			// Deterministic, and the same centre for every point of the cell.
-			if a, b := fixCellCentre(r, cl, co); a != cl || b != co {
+			if a, b := g.centre(cl, co); math.Abs(a-cl) > 1e-9 || math.Abs(b-co) > 1e-9 {
 				t.Fatalf("centre %v,%v does not map to itself (%v,%v)", cl, co, a, b)
 			}
 			// The cell is at least 2R wide on the ground, also at its
-			// poleward edge: the point's column neighbours are ≥ 2R apart.
-			row := math.Floor(lat / h)
-			edge := math.Max(math.Abs(row*h), math.Abs((row+1)*h))
-			if ncol := fixCellCols(edge, fixCellFrac*r); ncol > 1 {
+			// poleward edge, and 2R high.
+			_, _, edge := g.rowAt(lat)
+			if ncol := g.cols(edge); ncol > 1 {
 				wM := 360 / ncol * locMetresPerDeg * math.Cos(math.Min(edge, fixCellMaxLat)*math.Pi/180)
 				if wM < fixCellFrac*r-1e-6 {
 					t.Fatalf("r=%v lat=%v: cell %.1f m wide < %v", r, lat, wM, fixCellFrac*r)
 				}
 			}
+			if hM := g.h * locMetresPerDeg; hM < fixCellFrac*r-1e-6 {
+				t.Fatalf("r=%v: cell %.1f m high", r, hM)
+			}
 		}
 	}
-	// The antimeridian is a column edge: both sides stay in [-180, 180).
+	// The antimeridian is no seam: every longitude maps into [-180, 180).
+	g := fixGridFor(cellTestFuzzer(t, 1000))
 	for _, lon := range []float64{-180, 179.999999, 180, 540.5} {
-		if _, co := fixCellCentre(1000, 10, lon); co < -180 || co >= 180 {
+		if _, co := g.centre(10, lon); co < -180 || co >= 180 {
 			t.Errorf("lon %v → centre lon %v", lon, co)
 		}
+	}
+}
+
+// The grid origin is secret: the same secret gives the same cells (even from
+// another fuzzer instance), another secret other cells.
+func TestFixGridSecretOrigin(t *testing.T) {
+	a := fixGridFor(cellTestFuzzerWith(t, 1000, strings.Repeat("a", 32)))
+	a2 := fixGridFor(cellTestFuzzerWith(t, 1000, strings.Repeat("a", 32)))
+	b := fixGridFor(cellTestFuzzerWith(t, 1000, strings.Repeat("b", 32)))
+	if *a != *a2 {
+		t.Fatalf("same secret, different grids: %+v vs %+v", a, a2)
+	}
+	if a.fLat == b.fLat || a.fLon == b.fLon {
+		t.Fatalf("different secrets share an offset: %+v vs %+v", a, b)
+	}
+	diff := 0
+	rng := rand.New(rand.NewSource(5))
+	for i := 0; i < 200; i++ {
+		lat, lon := 37+rng.Float64(), -122+rng.Float64()
+		al, ao := a.centre(lat, lon)
+		bl, bo := b.centre(lat, lon)
+		cl, co := a2.centre(lat, lon)
+		if al != cl || ao != co {
+			t.Fatal("same secret, different centre")
+		}
+		if al != bl || ao != bo {
+			diff++
+		}
+	}
+	if diff < 150 {
+		t.Errorf("only %d of 200 fixes land in a different cell under another secret", diff)
+	}
+	// Independent of the node grid: a different label, so different offsets.
+	f := cellTestFuzzerWith(t, 1000, strings.Repeat("a", 32))
+	if g := fixGridFor(f); g.fLat == f.fLat || g.fLon == f.fLon {
+		t.Error("the fix grid reuses the node grid's offsets")
+	}
+}
+
+// The per-row path allocates nothing.
+func TestFixGridNoAlloc(t *testing.T) {
+	g := fixGridFor(cellTestFuzzer(t, 1000))
+	rows := make([]coverageRow, 512)
+	for i := range rows {
+		rows[i].Lat, rows[i].Lon = 37.4+float64(i)*1e-4, -122.1
+	}
+	b := bbox{MinLat: 30, MinLon: -130, MaxLat: 40, MaxLon: -120}
+	work := make([]coverageRow, len(rows))
+	if n := testing.AllocsPerRun(50, func() {
+		copy(work, rows)
+		binCoverageRows(work, g, b)
+		g.centre(37.4, -122.1)
+	}); n != 0 {
+		t.Errorf("binning allocates %v times per run, want 0", n)
 	}
 }
 
@@ -128,41 +197,43 @@ func TestFixCellCentre(t *testing.T) {
 // whose cell centre lies in the bbox: none is lost at an edge.
 func TestBinFixesInBBoxMatchesCentreRule(t *testing.T) {
 	type fix struct{ Lat, Lon float64 }
+	g := fixGridFor(cellTestFuzzer(t, cellTestRadiusM))
 	rng := rand.New(rand.NewSource(3))
-	for _, base := range [][2]float64{{37.4, -122.2}, {69.6, 18.9}, {-33.9, 151.2}, {0.01, 179.98}} {
+	for _, base := range [][2]float64{{37.4, -122.2}, {69.6, 18.9}, {-33.9, 151.2}, {0.01, 179.98}, {-12, -179.95}} {
 		var all []fix
 		for i := 0; i < 3000; i++ {
-			all = append(all, fix{base[0] + (rng.Float64()-0.5)*0.4, base[1] + (rng.Float64()-0.5)*0.4})
+			all = append(all, fix{base[0] + (rng.Float64()-0.5)*0.4, wrapLon(base[1] + (rng.Float64()-0.5)*0.4)})
 		}
 		for k := 0; k < 50; k++ {
 			s, w := base[0]+(rng.Float64()-0.5)*0.3, base[1]+(rng.Float64()-0.5)*0.3
 			b := bbox{MinLat: s, MinLon: w, MaxLat: s + rng.Float64()*0.05, MaxLon: w + rng.Float64()*0.05}
 			want := 0
 			for _, f := range all {
-				if b.contains(fixCellCentre(cellTestRadiusM, f.Lat, f.Lon)) {
+				if b.contains(g.centre(f.Lat, f.Lon)) {
 					want++
 				}
 			}
-			qb := b.widenForFixCells(cellTestRadiusM)
+			qb := b.widenForFixCells(g)
 			var pre []fix
 			for _, f := range all {
 				if qb.contains(f.Lat, f.Lon) {
 					pre = append(pre, f)
 				}
 			}
-			got := binFixesInBBox(pre, cellTestRadiusM, b, func(f *fix) (*float64, *float64) { return &f.Lat, &f.Lon })
+			got := binFixesInBBox(pre, g, b, func(f *fix) (*float64, *float64) { return &f.Lat, &f.Lon })
 			if len(got) != want {
 				t.Fatalf("base %v bbox %+v: %d fixes kept, want %d", base, b, len(got), want)
 			}
 			for _, f := range got {
-				if c, o := fixCellCentre(cellTestRadiusM, f.Lat, f.Lon); c != f.Lat || o != f.Lon {
+				if c, o := g.centre(f.Lat, f.Lon); math.Abs(c-f.Lat) > 1e-9 || math.Abs(o-f.Lon) > 1e-9 {
 					t.Fatalf("kept row %v is not a cell centre", f)
 				}
 			}
 		}
 	}
-	if b := (bbox{1, 2, 3, 4}); b.widenForFixCells(0) != b {
-		t.Error("radius 0 must leave the bbox as it is")
+	var off *fixGrid
+	if b := (bbox{1, 2, 3, 4}); b.widenForFixCells(off) != b {
+		t.Error("no grid must leave the bbox as it is")
 	}
 }
 
@@ -177,7 +248,7 @@ func TestRxCoveragePrivacyBinsBeforeBBox(t *testing.T) {
 	gapLat, gapLon := 37.60, -122.40
 	insTrack(t, srv.db, "compa", now, gapLat, gapLon, 0)
 	mustExecDB(t, srv.db, `UPDATE client_rf_samples SET noise_floor = -110`)
-	cLat, cLon := fixCellCentre(cellTestRadiusM, fixLat, fixLon)
+	cLat, cLon := fixGridFor(srv.cfg.LocationFuzzer()).centre(fixLat, fixLon)
 	if distanceM(fixLat, fixLon, cLat, cLon) < 1 {
 		t.Fatal("test fix sits on its cell centre; pick another")
 	}
@@ -265,20 +336,22 @@ func TestMobileReceptionsSummaryPrivacyMeasuresFromCells(t *testing.T) {
 	if got == nil || got.MaxDistanceKm == nil {
 		t.Fatalf("summary = %+v", got)
 	}
-	cl, co := fixCellCentre(cellTestRadiusM, 51.123456, 4.234567)
+	cl, co := fixGridFor(srv.cfg.LocationFuzzer()).centre(51.123456, 4.234567)
 	if want := haversineKm(lat, lon, cl, co); *got.MaxDistanceKm != want {
 		t.Fatalf("max distance %v, want %v (to the cell centre)", *got.MaxDistanceKm, want)
 	}
 }
 
-// Two fixes 300 m apart in one privacy cell: different leaderboard cells
-// without privacy, one with it.
+// Two fixes 400 m apart in one privacy cell (≥ 2 km wide): different
+// leaderboard cells without privacy, one with it.
 func TestRxLeaderboardPrivacyCells(t *testing.T) {
-	lat1, lon1 := 51.05, 3.72
-	lat2, lon2 := lat1, lon1+0.0043 // ~300 m east
-	a1, b1 := fixCellCentre(cellTestRadiusM, lat1, lon1)
-	if a2, b2 := fixCellCentre(cellTestRadiusM, lat2, lon2); a1 != a2 || b1 != b2 {
-		t.Fatal("test fixes are not in one privacy cell; pick others")
+	g := fixGridFor(cellTestFuzzer(t, cellTestRadiusM))
+	cLat, cLon := g.centre(51.05, 3.72)
+	lat1, lon1 := cLat, cLon-0.00286 // ~200 m west of the centre
+	lat2, lon2 := cLat, cLon+0.00286 // ~200 m east
+	a1, b1 := g.centre(lat1, lon1)
+	if a2, b2 := g.centre(lat2, lon2); a1 != a2 || b1 != b2 {
+		t.Fatal("test fixes are not in one privacy cell")
 	}
 	for _, tc := range []struct {
 		radius float64

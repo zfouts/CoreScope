@@ -152,8 +152,8 @@ func (s *Server) queryRfNoiseRows(rx string, rxIn []string, days int, b bbox) ([
 	if rxIn != nil && len(rxIn) == 0 {
 		return []rfNoiseRow{}, nil
 	}
-	radius := s.cfg.LocationFuzzer().RadiusM()
-	qb := b.widenForFixCells(radius)
+	grid := fixGridFor(s.cfg.LocationFuzzer())
+	qb := b.widenForFixCells(grid)
 	where := []string{"lat BETWEEN ? AND ?", "lon BETWEEN ? AND ?", "noise_floor IS NOT NULL"}
 	args := []interface{}{qb.MinLat, qb.MaxLat, qb.MinLon, qb.MaxLon}
 	where, args = appendRxFilter(where, args, "rx_pubkey", rx, rxIn)
@@ -182,10 +182,7 @@ func (s *Server) queryRfNoiseRows(rx string, rxIn []string, days int, b bbox) ([
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if radius > 0 {
-		out = binFixesInBBox(out, radius, b, func(r *rfNoiseRow) (*float64, *float64) { return &r.Lat, &r.Lon })
-	}
-	return out, nil
+	return binFixesInBBox(out, grid, b, func(r *rfNoiseRow) (*float64, *float64) { return &r.Lat, &r.Lon }), nil
 }
 
 // handleRfNoise serves the RF noise-floor map layer as GeoJSON hex cells,

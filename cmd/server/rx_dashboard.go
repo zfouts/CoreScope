@@ -115,8 +115,8 @@ func (s *Server) queryCoverageFiltered(node, rx string, rxIn []string, days int,
 	if rxIn != nil && len(rxIn) == 0 {
 		return nil, nil
 	}
-	radius := s.cfg.LocationFuzzer().RadiusM()
-	qb := b.widenForFixCells(radius)
+	grid := fixGridFor(s.cfg.LocationFuzzer())
+	qb := b.widenForFixCells(grid)
 	where := []string{"lat BETWEEN ? AND ?", "lon BETWEEN ? AND ?"}
 	args := []interface{}{qb.MinLat, qb.MaxLat, qb.MinLon, qb.MaxLon}
 	if node != "" {
@@ -143,7 +143,7 @@ func (s *Server) queryCoverageFiltered(node, rx string, rxIn []string, days int,
 	if err != nil {
 		return nil, err
 	}
-	return binCoverageRows(out, radius, b), nil
+	return binCoverageRows(out, grid, b), nil
 }
 
 // appendRxFilter narrows a client_* table query to one companion (rx) and/or
@@ -321,7 +321,7 @@ func (s *Server) rxLeaderboard(ctx context.Context, days, limit int) ([]LeaderOb
 		cells      map[string]struct{}
 		nodes      map[string]struct{}
 	}
-	radius := s.cfg.LocationFuzzer().RadiusM()
+	grid := fixGridFor(s.cfg.LocationFuzzer())
 	obsAgg := map[string]*agg{}
 	cellObservers := map[string]map[string]struct{}{} // cell -> set of rx_pubkey
 
@@ -346,9 +346,9 @@ func (s *Server) rxLeaderboard(ctx context.Context, days, limit int) ([]LeaderOb
 		a.receptions++
 		a.nodes[heardKey] = struct{}{}
 		res := leaderboardHexRes
-		if radius > 0 {
-			lat, lon = fixCellCentre(radius, lat, lon)
-			if c := maxHexResForRadius(radius, lat); c < res {
+		if grid != nil {
+			lat, lon = grid.centre(lat, lon)
+			if c := maxHexResForRadius(grid.RadiusM(), lat); c < res {
 				res = c
 			}
 		}

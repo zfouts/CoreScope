@@ -276,8 +276,8 @@ func sqlPlaceholders(n int) string {
 // bbox. Read-only (server RO connection). With location privacy on, the rows
 // carry their privacy cell centres and the bbox applies to those (binCoverageRows).
 func (s *Server) queryCoverageRows(pubkey string, b bbox) ([]coverageRow, error) {
-	radius := s.cfg.LocationFuzzer().RadiusM()
-	qb := b.widenForFixCells(radius)
+	grid := fixGridFor(s.cfg.LocationFuzzer())
+	qb := b.widenForFixCells(grid)
 	cands := coverageHeardKeyCandidates(pubkey)
 	args := make([]interface{}, 0, len(cands)+4)
 	for _, c := range cands {
@@ -297,16 +297,13 @@ func (s *Server) queryCoverageRows(pubkey string, b bbox) ([]coverageRow, error)
 	if err != nil {
 		return nil, err
 	}
-	return binCoverageRows(out, radius, b), nil
+	return binCoverageRows(out, grid, b), nil
 }
 
 // binCoverageRows is binFixesInBBox for coverage rows; rows unchanged when
-// radiusM is 0 (privacy off), so the SQL bbox alone decides as before.
-func binCoverageRows(rows []coverageRow, radiusM float64, b bbox) []coverageRow {
-	if radiusM <= 0 {
-		return rows
-	}
-	return binFixesInBBox(rows, radiusM, b, func(r *coverageRow) (*float64, *float64) { return &r.Lat, &r.Lon })
+// grid is nil (privacy off), so the SQL bbox alone decides as before.
+func binCoverageRows(rows []coverageRow, grid *fixGrid, b bbox) []coverageRow {
+	return binFixesInBBox(rows, grid, b, func(r *coverageRow) (*float64, *float64) { return &r.Lat, &r.Lon })
 }
 
 // mobileRxStats returns the total mobile-client receptions of a node (by its
@@ -469,7 +466,7 @@ func (s *Server) mobileReceptionsSummary(pubkey, fromISO string, nodeLat, nodeLo
 		return nil
 	}
 	defer rows.Close()
-	radius := s.cfg.LocationFuzzer().RadiusM()
+	grid := fixGridFor(s.cfg.LocationFuzzer())
 	var sum MobileReceptionsSummary
 	var snrs []float64
 	receivers := map[string]struct{}{}
@@ -486,7 +483,7 @@ func (s *Server) mobileReceptionsSummary(pubkey, fromISO string, nodeLat, nodeLo
 			snrs = append(snrs, snr.Float64)
 		}
 		if nodeLat != nil && nodeLon != nil && lat.Valid && lon.Valid {
-			fLat, fLon := fixCellCentre(radius, lat.Float64, lon.Float64)
+			fLat, fLon := grid.centre(lat.Float64, lon.Float64)
 			maxKm = math.Max(maxKm, haversineKm(*nodeLat, *nodeLon, fLat, fLon))
 		}
 	}
