@@ -44,7 +44,7 @@
 'use strict';
 const { chromium } = require('playwright');
 const DE = require('./lib/ducting-e2e');
-const { loraFreqsOf, assert, sleep, openPicker, setOverlayUi, pageState, inPageOverlaps, cssVars,
+const { loraFreqsOf, inPageStatus, assert, sleep, openPicker, setOverlayUi, pageState, inPageOverlaps, cssVars,
   inPageFieldProbe, fieldProblems, outlineProblems, pointsIn, settled, panelState } = DE;
 
 const BASE = (process.env.BASE_URL || 'http://localhost:13598').replace(/\/+$/, '');
@@ -701,12 +701,18 @@ async function run() {
       ['pending meta', 200, { status: 'pending', source: 'gfs-grid', times: [] }, /being prepared/],
       ['HTTP 500 meta', 500, { error: 'x' }, /unavailable/],
     ]) {
-      await test(`legend explains a ${name} answer, nothing drawn`, async () => {
+      await test(`the status line explains a ${name} answer, also with the legend collapsed; nothing drawn`, async () => {
         const sp = await track({ theme: 'light', overlays: ['ducting'] });
         await sp.page.route('**/api/ducting/meta', (route) => route.fulfill({ status, json: body }));
         await gotoRoute(sp.page, '#/map');
-        await sp.page.waitForSelector('.mc-duct-legend', { state: 'visible', timeout: 25000 });
-        await sp.page.waitForFunction((src) => new RegExp(src).test((document.querySelector('.mc-duct-legend') || {}).textContent || ''), want.source, { timeout: 10000 });
+        await sp.page.waitForSelector('.mc-duct-status', { state: 'visible', timeout: 25000 });
+        await sp.page.waitForFunction((src) => new RegExp(src).test((document.querySelector('.mc-duct-status') || {}).textContent || ''), want.source, { timeout: 10000 });
+        let ss = await sp.page.evaluate(inPageStatus);
+        assert(ss.count === 1 && !ss.inLegend && want.test(ss.text), 'status: ' + JSON.stringify(ss));
+        await sp.page.locator('.mc-duct-collapse').first().click();
+        await sleep(200);
+        ss = await sp.page.evaluate(inPageStatus);
+        assert(!ss.legend && want.test(ss.text), 'collapsed: ' + JSON.stringify(ss));
         const st = await pageState(sp.page);
         assert(!st.cells && !st.fields.length, 'field drawn');
         const errs = sp.page.__errors.filter(e => !/Failed to load resource/.test(e));

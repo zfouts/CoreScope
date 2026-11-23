@@ -17,7 +17,8 @@
  *     time and theme change, resized/rebounded on refresh, removed on teardown
  *   - nothing interactive on the map: the cells with data are a list, the
  *     dashed LoRa outline (shown fmin <= the highest judged LoRa frequency:
- *     915 MHz by default, else the site's los.frequencyMhz) one
+ *     915 MHz by default, else the site's los.frequencyMhz when the operator
+ *     set one: the shipped default 910.525 counts as not set) one
  *     non-interactive multi-polygon on a canvas in a pane without pointer
  *     events
  *   - map clicks: MC_ductCellAt lattice lookup (world copies), one map click
@@ -28,10 +29,19 @@
  *     fade at the area's outer edge
  *   - popup text per class, the 1.5 km gradient line, the LoRa line (one
  *     threshold with the outline), the frequency to 2 significant figures
- *   - pending / error / failed-refresh legend states, legend content; the
+ *   - pending / error / failed-refresh states, legend content; the
  *     out-of-date notice on error, failure or a run-out forecast, not on
- *     pending; no rebuild when a refresh brings the same generatedAt
+ *     pending; the one status line outside the legend, so a collapsed panel
+ *     shows it; no rebuild when a refresh brings the same generatedAt
+ *   - the hour tick: one timer aimed at the top of the hour moves the now
+ *     line and the shown hour (not a user-picked one) without a request
  *   - remove during an in-flight fetch, timer cleanup, refresh cadence
+ *   - a refresh that aborts the request before it never marks the held
+ *     forecast out of date; a user-picked hour that left the forecast is
+ *     dropped, so the shown hour follows the clock again
+ *   - the corner lift above the attribution bar: measured on map resize and
+ *     when the bar resizes, never per added or removed layer (at most once a
+ *     frame, for attributed layers only, where ResizeObserver is missing)
  *   - overlay registry + MC_buildOverlayLayer (factory absent -> null)
  *   - the panel: one control (header, timeline, legend body), collapse and
  *     its persistence (storage missing, null or throwing), moving it
@@ -39,9 +49,10 @@
  *     off on phones, no corner lift while moved) and its teardown
  *   - the timeline: built once per set of times, aria state, keys, buttons,
  *     Now, wheel, mouse drag, click, rAF-coalesced user scrolls that settle
- *     on a time, code positioning that never counts as a user pick; in grid
- *     mode every pick through _pickTime (once per frame while scrolling),
- *     ductT restoring the strip, Now clearing ductT, the now line
+ *     on a time, code positioning that never counts as a user pick, a
+ *     strip laid out late (hidden map) positioned once it has a size; in
+ *     grid mode every pick through _pickTime (once per frame while
+ *     scrolling), ductT restoring the strip, Now clearing ductT, the now line
  *   - the legend body's height cap inside the panel, docked and moved,
  *     and the re-clamp when the long-links table loads
  *
@@ -83,6 +94,9 @@ function makeEl(tag) {
   let scrollLeft = 0;
   const el = {
     tagName: tag, className: '', children: [], attrs: {}, parentNode: null, value: '', listeners, style: {}, rect: null,
+    // Laid out, with plenty to scroll. 0 = no layout box (a hidden map):
+    // like the browser, scrollLeft then stays where it is.
+    scrollWidth: 100000,
     appendChild(c) {
       if (c.parentNode && c.parentNode.removeChild) c.parentNode.removeChild(c);
       el.children.push(c); c.parentNode = el; return c;
@@ -114,9 +128,10 @@ function makeEl(tag) {
   };
   Object.defineProperty(el, 'scrollLeft', {
     get() { return scrollLeft; },
-    set(v) { const n = Math.max(0, Number(v) || 0); if (n !== scrollLeft) { scrollLeft = n; scrolled.add(el); } },
+    set(v) { const n = Math.max(0, Number(v) || 0); if (el.scrollWidth && n !== scrollLeft) { scrollLeft = n; scrolled.add(el); } },
   });
   Object.defineProperty(el, 'textContent', {
+    configurable: true,
     get() { return text + el.children.map(c => c.textContent).join('\n'); },
     set(v) { text = String(v); el.children = []; },
   });
@@ -230,6 +245,9 @@ function makeApi() {
   const api = { calls: [] };
   api.fetch = (url, opts) => new Promise((resolve, reject) => {
     api.calls.push({ url, opts, ok(body) { resolve({ ok: true, json: () => Promise.resolve(body) }); }, fail() { reject(new Error('net')); } });
+    // Like fetch: an aborted request rejects with the signal's AbortError.
+    const sig = opts && opts.signal;
+    if (sig) sig.addEventListener('abort', () => reject(sig.reason));
   });
   return api;
 }
@@ -259,18 +277,38 @@ function makeSandbox(opts) {
     cancelAnimationFrame(id) { const i = frames.findIndex(t => t.id === id); if (i >= 0) frames.splice(i, 1); },
   };
   if ('storage' in opts) ctx.localStorage = opts.storage;
+  // Off by default (the fallback paths); abort: the real AbortController;
+  // ro: a ResizeObserver whose instances (in `observers`) fire on demand.
+  const observers = [];
+  if (opts.abort) ctx.AbortController = AbortController;
+  if (opts.ro) {
+    ctx.ResizeObserver = function (cb) {
+      const o = this;
+      o.targets = [];
+      o.observe = (t) => { o.targets.push(t); };
+      o.disconnect = () => { o.targets = []; o.gone = true; };
+      o.fire = () => { if (!o.gone) cb([]); };
+      observers.push(o);
+    };
+  }
   if (opts.narrow) ctx.matchMedia = (q) => ({ matches: /max-width: 600px/.test(q) });
   ctx.window = ctx;
   ctx.CSApi = makeApi();
   if (!opts.noLeaflet) ctx.L = makeLeaflet(stats);
   vm.createContext(ctx);
   vm.runInContext(SRC, ctx, { filename: 'map-ducting.js' });
-  // Runs the queued frames / timeouts (and what they queue in turn).
+  // Runs the queued frames / timeouts (and what they queue in turn). The
+  // timeouts are the panel's short ones; the hour tick (up to an hour away)
+  // only runs through runHourTick.
   const runFrames = () => { let n = 0; while (frames.length && n++ < 50) frames.shift().fn(); };
-  const runTimeouts = () => { let n = 0; while (timeouts.length && n++ < 50) timeouts.shift().fn(); };
+  const short = (t) => t.ms < 60000;
+  const uiTimeouts = () => timeouts.filter(short);
+  const runTimeouts = () => { let n = 0, i; while ((i = timeouts.findIndex(short)) >= 0 && n++ < 50) timeouts.splice(i, 1)[0].fn(); };
+  const hourTicks = () => timeouts.filter(t => !short(t));
+  const runHourTick = () => { const i = timeouts.findIndex(t => !short(t)); if (i >= 0) timeouts.splice(i, 1)[0].fn(); };
   // What the browser does after scrollLeft changes: scroll events, then a frame.
   const settleScroll = () => { flushScroll(); runFrames(); };
-  return { ctx, stats, timers, cleared, api: ctx.CSApi, vars, winL, timeouts, frames, runFrames, runTimeouts, settleScroll };
+  return { ctx, stats, timers, cleared, observers, api: ctx.CSApi, vars, winL, timeouts, frames, runFrames, runTimeouts, uiTimeouts, hourTicks, runHourTick, settleScroll };
 }
 
 // A Map-like localStorage; throwing: every call throws.
@@ -987,26 +1025,54 @@ test('default bands: f=900 is outlined; popup says 868 not trapped, 915 possibly
   assert.deepStrictEqual(lines, ['LoRa 868 MHz: not trapped by this layer', 'LoRa 915 MHz: possibly trapped (model estimate)']);
 });
 
-test('site frequency 910.525 MHz: one verdict line, outline threshold 910.525 (905 yes, 950 no)', async () => {
+test('site frequency 912.5 MHz: one verdict line, outline threshold 912.5 (905 yes, 950 no)', async () => {
   const body = clone(SAMPLE);
   body.cells[0].c = [4, 4, 4]; body.cells[0].f = [905, 950, 868];
-  const s = await mount(body, T0, { frequencyMhz: 910.525 });
+  const s = await mount(body, T0, { frequencyMhz: 912.5 });
   const pop = (i) => s.ctx.MC_ductPopupContent(body.cells[0], i).textContent;
   const lora = (i) => pop(i).split('\n').filter(l => /^LoRa /.test(l));
   assert.ok(loraSet(s).includes('51.25,-0.25'), 'f=905 (shown 910) outlined');
-  assert.deepStrictEqual(lora(0), ['LoRa 910.525 MHz: possibly trapped (model estimate)']);
+  assert.deepStrictEqual(lora(0), ['LoRa 912.5 MHz: possibly trapped (model estimate)']);
   assert.ok(pop(0).includes('Lowest trapped frequency: \u2248 910 MHz (model estimate)'), pop(0));
   s.layer._setIndex(1);
   assert.ok(!loraSet(s).includes('51.25,-0.25'), 'f=950 not outlined');
-  assert.deepStrictEqual(lora(1), ['LoRa 910.525 MHz: not trapped by this layer']);
+  assert.deepStrictEqual(lora(1), ['LoRa 912.5 MHz: not trapped by this layer']);
   s.layer._setIndex(2);
-  assert.ok(loraSet(s).includes('51.25,-0.25'), 'f=868 (shown 870) outlined at 910.525');
-  assert.ok(legendText(s).includes('Dashed outline: the model shows a duct that may carry LoRa at 910.525 MHz'), legendText(s));
+  assert.ok(loraSet(s).includes('51.25,-0.25'), 'f=868 (shown 870) outlined at 912.5');
+  assert.ok(legendText(s).includes('Dashed outline: the model shows a duct that may carry LoRa at 912.5 MHz'), legendText(s));
   // Out of range site frequencies fall back to the two bands.
   for (const bad of [50, 7000, 'x', null]) {
     const b = await mount(clone(SAMPLE), T0, { frequencyMhz: bad });
     assert.ok(legendText(b).includes('LoRa at 868 / 915 MHz'), 'frequencyMhz ' + bad);
   }
+});
+
+test('site frequency left at the shipped default 910.525 is not the operator\'s choice: both bands; 869.525 and 915 are judged alone', async () => {
+  const body = clone(SAMPLE);
+  body.cells[0].c = [4, 4, 4]; body.cells[0].f = [860, 905, 950];
+  const lora = (s, i) => s.ctx.MC_ductPopupContent(body.cells[0], i).textContent.split('\n').filter(l => /^LoRa /.test(l));
+  // The default, as the server sends it and as a string: an EU site that
+  // never set los.frequencyMhz still gets its 868 MHz verdict.
+  for (const dflt of [910.525, '910.525']) {
+    const d = await mount(body, T0, { frequencyMhz: dflt });
+    assert.ok(legendText(d).includes('may carry LoRa at 868 / 915 MHz'), legendText(d));
+    assert.deepStrictEqual(lora(d, 0), ['LoRa 868 MHz: possibly trapped (model estimate)', 'LoRa 915 MHz: possibly trapped (model estimate)']);
+    assert.deepStrictEqual(lora(d, 1), ['LoRa 868 MHz: not trapped by this layer', 'LoRa 915 MHz: possibly trapped (model estimate)']);
+    assert.ok(loraSet(d).includes('51.25,-0.25'), 'outlined up to 915');
+  }
+  const eu = await mount(body, T0, { frequencyMhz: 869.525 });
+  assert.ok(legendText(eu).includes('may carry LoRa at 869.525 MHz'), legendText(eu));
+  assert.deepStrictEqual(lora(eu, 0), ['LoRa 869.525 MHz: possibly trapped (model estimate)']);
+  assert.deepStrictEqual(lora(eu, 1), ['LoRa 869.525 MHz: not trapped by this layer']);
+  eu.layer._setIndex(1);
+  assert.ok(!loraSet(eu).includes('51.25,-0.25'), 'f=905 is above 869.525: no outline');
+  const us = await mount(body, T0, { frequencyMhz: 915 });
+  assert.ok(legendText(us).includes('may carry LoRa at 915 MHz'), legendText(us));
+  assert.deepStrictEqual(lora(us, 1), ['LoRa 915 MHz: possibly trapped (model estimate)']);
+  assert.deepStrictEqual(lora(us, 2), ['LoRa 915 MHz: not trapped by this layer']);
+  // Next to the default is a choice.
+  const near = await mount(body, T0, { frequencyMhz: 910.53 });
+  assert.ok(legendText(near).includes('may carry LoRa at 910.53 MHz'), legendText(near));
 });
 
 test('LoRa outline and popup agree for every class and frequency (default bands and a site frequency)', async () => {
@@ -1015,7 +1081,7 @@ test('LoRa outline and popup agree for every class and frequency (default bands 
   body.times = fs_.map((_, i) => T0 + i * 3600);
   const mk = (c) => ({ lat: 51.25, lon: -0.25, c: fs_.map(() => c), f: fs_.slice(), b: fs_.map(() => 0), t: fs_.map(() => 100), dm: fs_.map(() => 50), n: fs_.map(() => -60) });
   const sig2 = (v) => Number(Number(v).toPrecision(2));
-  for (const [los, freqs] of [[null, [868, 915]], [{ frequencyMhz: 910.525 }, [910.525]]]) {
+  for (const [los, freqs] of [[null, [868, 915]], [{ frequencyMhz: 910.525 }, [868, 915]], [{ frequencyMhz: 906.875 }, [906.875]]]) {
     for (const cls of [2, 3, 4]) {
       body.cells = [mk(cls)];
       const s = await mount(body, T0, los);
@@ -1619,13 +1685,107 @@ test('out-of-date notice: on error and failure while old data is drawn, not on p
       await refresh(body);
       assert.ok(legendText(s).includes(MSG), JSON.stringify(body));
       assert.strictEqual(s.layer._cells.length, 3, 'old data still drawn');
-      const status = find(s.layer._legendEl, n => n.className === 'mc-duct-legend-status');
-      assert.strictEqual(status.length, 1, 'one status line');
+      assert.strictEqual(statusOf(s).text, MSG, 'the one status line');
     }
     const body = clone(SAMPLE); body.generatedAt += 60;
     await refresh(body);
     assert.ok(!legendText(s).includes('out of date'), 'cleared by ok');
+    assert.deepStrictEqual([statusOf(s).text, statusOf(s).el.hidden], ['', true], 'nothing to say: hidden and empty');
   } finally { Date.now = realNow; }
+});
+
+// The panel's one status line: { el, text shown ('' while hidden) }. Throws
+// unless there is exactly one, with role=status, in the always-visible
+// forecast-time block and not in the legend (which collapse hides).
+function statusOf(s) {
+  const panel = s.layer._panelEl;
+  const all = find(panel, n => n.attrs && n.attrs.role === 'status');
+  assert.strictEqual(all.length, 1, 'one role=status element in the panel');
+  const el = all[0];
+  assert.strictEqual(el.className, 'mc-duct-status');
+  assert.strictEqual(el.parentNode, one(panel, 'mc-duct-time'), 'in the forecast-time block');
+  assert.strictEqual(find(s.layer._legendEl, n => n === el).length, 0, 'not inside the legend');
+  assert.ok(!one(panel, 'mc-duct-time').hidden, 'its block is never hidden');
+  return { el, text: el.hidden ? '' : el.textContent };
+}
+
+test('status line: a collapsed panel still says out of date, being prepared or unavailable; nothing when all is well', async () => {
+  const realNow = Date.now;
+  const MSG = 'Forecast out of date \u2014 showing the last one received';
+  // Phones start collapsed; a wide screen collapsed by a click.
+  for (const narrow of [true, false]) {
+    const collapsed = (s) => {
+      if (!narrow) s.layer._collapseEl.fire('click');
+      assert.strictEqual(s.layer._legendEl.hidden, true, 'legend collapsed');
+      assert.ok(/mc-duct-panel-collapsed/.test(s.layer._panelEl.className));
+      return s;
+    };
+    // Out of date: a failed refresh while a forecast is drawn.
+    const s = collapsed(await mount(SAMPLE, T0, null, { narrow }));
+    assert.deepStrictEqual([statusOf(s).text, statusOf(s).el.hidden], ['', true], 'fresh forecast: no status');
+    try {
+      Date.now = () => (T0 + 60) * 1000;
+      s.timers[0].fn();
+      s.api.calls[s.api.calls.length - 1].fail();
+      await tick(); await tick();
+    } finally { Date.now = realNow; }
+    assert.strictEqual(s.layer._stale, true);
+    assert.strictEqual(statusOf(s).text, MSG);
+    assert.strictEqual(statusOf(s).el.hidden, false);
+    assert.ok(!s.layer._legendEl.textContent.includes('out of date'), 'not repeated in the legend');
+    // Expanding and collapsing changes nothing about it.
+    s.layer._collapseEl.fire('click');
+    assert.strictEqual(statusOf(s).text, MSG);
+    s.layer._collapseEl.fire('click');
+    assert.strictEqual(statusOf(s).text, MSG);
+    // No forecast yet: loading, then being prepared / unavailable.
+    const p = makeSandbox({ narrow });
+    const map = makeMap();
+    const layer = p.ctx.MC_createDuctingLayer({});
+    layer.onAdd(map);
+    Object.assign(p, { map, layer });
+    collapsed(p);
+    assert.strictEqual(statusOf(p).text, 'Loading ducting forecast');
+    p.api.calls[0].ok({ status: 'pending' });
+    await tick(); await tick();
+    assert.strictEqual(statusOf(p).text, 'Ducting forecast is being prepared');
+    p.timers[0].fn();
+    p.api.calls[1].ok({ status: 'error', error: 'boom' });
+    await tick(); await tick();
+    assert.strictEqual(statusOf(p).text, 'Ducting forecast unavailable');
+    p.timers[0].fn();
+    p.api.calls[2].fail();
+    await tick(); await tick();
+    assert.strictEqual(statusOf(p).text, 'Ducting forecast unavailable');
+    assert.strictEqual(p.layer._legendEl.hidden, true, 'still collapsed');
+    // The forecast arrives: the status goes.
+    try {
+      Date.now = () => (T0 + 60) * 1000;
+      p.timers[0].fn();
+      p.api.calls[3].ok(clone(SAMPLE));
+      await tick(); await tick();
+    } finally { Date.now = realNow; }
+    assert.deepStrictEqual([statusOf(p).text, statusOf(p).el.hidden], ['', true]);
+  }
+});
+
+test('status line: the same element is kept (a live region), rewritten only when the text changes; gone with the panel', async () => {
+  const s = await mount({ status: 'pending' });
+  const el = statusOf(s).el;
+  let writes = 0, text = el.textContent;
+  Object.defineProperty(el, 'textContent', { get() { return text; }, set(v) { text = String(v); writes++; } });
+  s.timers[0].fn();
+  s.api.calls[1].ok({ status: 'pending' });
+  await tick(); await tick();
+  assert.strictEqual(writes, 0, 'same message: not written again (no repeat announcement)');
+  s.timers[0].fn();
+  s.api.calls[2].fail();
+  await tick(); await tick();
+  assert.strictEqual(writes, 1);
+  assert.strictEqual(text, 'Ducting forecast unavailable');
+  assert.strictEqual(statusOf(s).el, el);
+  s.layer.onRemove(s.map);
+  assert.strictEqual(s.layer._statusEl, null);
 });
 
 test('out-of-date notice: shown once the held forecast has run out, whatever the server says', async () => {
@@ -1662,6 +1822,62 @@ test('an ok answer re-picks the hour, keeping a user-picked one that is still th
   } finally { Date.now = realNow; }
 });
 
+test('a refresh that aborts the request before it does not call the held forecast out of date', async () => {
+  const s = await mount(SAMPLE, T0, null, { abort: true });
+  s.timers[0].fn();                          // refresh 1, left in flight
+  s.timers[0].fn();                          // refresh 2 aborts it
+  assert.strictEqual(s.api.calls.length, 3);
+  assert.ok(s.api.calls[1].opts.signal.aborted && !s.api.calls[2].opts.signal.aborted);
+  await tick(); await tick();
+  assert.ok(!s.layer._stale, 'the aborted request is not a failure');
+  assert.ok(!legendText(s).includes('out of date'));
+  s.api.calls[2].fail();                     // the live request failing still is
+  await tick(); await tick();
+  assert.ok(s.layer._stale && legendText(s).includes('out of date'));
+});
+
+test('an aborted first request (no data yet) changes neither the status nor the retry timer', async () => {
+  const s = makeSandbox({ abort: true });
+  const map = makeMap();
+  const layer = s.ctx.MC_createDuctingLayer({});
+  layer.onAdd(map);
+  s.timers[0].fn();
+  await tick(); await tick();
+  assert.strictEqual(layer._state, 'loading');
+  assert.strictEqual(s.timers[0].ms, 30 * 60 * 1000, 'not switched to the retry period');
+  s.api.calls[1].ok(clone(SAMPLE));
+  await tick(); await tick();
+  assert.strictEqual(layer._cells.length, 3);
+});
+
+test('a user-picked hour that left the forecast is dropped: the shown hour follows the clock again', async () => {
+  const s = await mount(SAMPLE, T0);
+  const realNow = Date.now;
+  try {
+    Date.now = () => (T0 + 60) * 1000;
+    s.layer._tl.fire('keydown', { key: 'Home' });
+    assert.ok(s.layer._userPicked && s.layer._idx === 0);
+    // The next forecast starts an hour later: T0 is gone.
+    Date.now = () => (T1 + 60) * 1000;
+    const body = clone(SAMPLE);
+    body.generatedAt = SAMPLE.generatedAt + 3600;
+    body.times = [T1, T2, T2 + 3600];
+    s.timers[0].fn();
+    s.api.calls[1].ok(body);
+    await tick(); await tick();
+    assert.strictEqual(s.layer._idx, 0, 'fell back to now (T1)');
+    assert.strictEqual(s.layer._userPicked, false, 'no longer a user pick');
+    Date.now = () => (T2 + 60) * 1000;
+    s.runHourTick();
+    assert.strictEqual(s.layer._idx, 1, 'the hour tick moves on');
+    Date.now = () => (T2 + 3660) * 1000;
+    s.timers[0].fn();
+    s.api.calls[2].ok(clone(body));
+    await tick(); await tick();
+    assert.strictEqual(s.layer._idx, 2, 'and so does a refresh');
+  } finally { Date.now = realNow; }
+});
+
 // ── legend text, compact legend ─────────────────────────────────────────────
 
 test('legend shows only the attribution, not the model twice', async () => {
@@ -1690,6 +1906,18 @@ test('legend is collapsible and starts collapsed on narrow screens; header and t
   assert.ok(!one(panel, 'mc-duct-time').hidden && !one(panel, 'mc-duct-head').hidden, 'timeline and header stay');
 });
 
+// Counts each measurement of the attribution bar (a forced layout in the browser).
+function countMeasures(map) {
+  const a = map.attr, c = { n: 0 };
+  let h = a.offsetHeight;
+  Object.defineProperty(a, 'offsetHeight', { get() { c.n++; return h; }, set(v) { h = v; } });
+  a.getBoundingClientRect = function () { c.n++; return this.rect; };
+  return c;
+}
+const attrObserver = (s, map) => s.observers.filter(o => o.targets.includes(map.attr))[0];
+const tileLayer = { getAttribution: () => '(c) tiles' };
+const marker = { getAttribution: () => undefined };
+
 test('bottom-left corner is lifted above the attribution bar, re-measured, and released', () => {
   const s = makeSandbox();
   const map = makeMap();
@@ -1700,7 +1928,7 @@ test('bottom-left corner is lifted above the attribution bar, re-measured, and r
   map.fire('resize');
   assert.strictEqual(map.corner.style.marginBottom, '54px', 'follows a taller bar');
   map.attr.rect = { left: 400 };            // short bar at the right: no overlap
-  map.fire('layeradd');
+  map.fire('resize');
   assert.strictEqual(map.corner.style.marginBottom, '', 'no lift without overlap');
   map.attr.rect = { left: 0 };
   map.fire('resize');
@@ -1709,6 +1937,88 @@ test('bottom-left corner is lifted above the attribution bar, re-measured, and r
   assert.strictEqual(map.corner.style.marginBottom, '', 'released on remove');
   assert.strictEqual((map._on.resize || []).length, 0);
   assert.strictEqual((map._on.layeradd || []).length, 0);
+  assert.strictEqual((map._on.layerremove || []).length, 0);
+});
+
+test('corner lift with ResizeObserver: 1000 layers added and removed measure nothing; the bar resizing and a map resize do', () => {
+  const s = makeSandbox({ ro: true });
+  const map = makeMap();
+  const layer = s.ctx.MC_createDuctingLayer({});
+  layer.onAdd(map);
+  assert.strictEqual(map.corner.style.marginBottom, '36px');
+  const ro = attrObserver(s, map);
+  assert.ok(ro, 'the attribution bar is observed');
+  const m = countMeasures(map);
+  for (let i = 0; i < 1000; i++) {
+    const l = i % 10 ? marker : tileLayer;
+    map.fire('layeradd', { layer: l });
+    map.fire('layerremove', { layer: l });
+  }
+  s.runFrames(); s.runTimeouts();
+  assert.strictEqual(m.n, 0, 'no layout read per layer');
+  map.attr.offsetHeight = 54;                // the bar wrapped to another line
+  ro.fire();
+  assert.strictEqual(map.corner.style.marginBottom, '54px', 'bar resize re-measures');
+  map.attr.offsetHeight = 18;
+  map.fire('resize');
+  assert.strictEqual(map.corner.style.marginBottom, '18px', 'map resize re-measures');
+  layer.onRemove(map);
+  assert.ok(ro.gone, 'observer disconnected');
+  assert.strictEqual(map.corner.style.marginBottom, '');
+  ['resize', 'layeradd', 'layerremove'].forEach(e => assert.strictEqual((map._on[e] || []).length, 0, e));
+});
+
+test('corner lift without ResizeObserver: only attributed layers re-measure, once per frame however many', () => {
+  const s = makeSandbox();
+  const map = makeMap();
+  const layer = s.ctx.MC_createDuctingLayer({});
+  layer.onAdd(map);
+  s.runFrames();
+  const m = countMeasures(map);
+  const frames0 = s.frames.length;
+  for (let i = 0; i < 1000; i++) {
+    map.fire('layeradd', { layer: marker });
+    map.fire('layerremove', { layer: marker });
+  }
+  map.fire('layeradd');                      // no event object: ignored, no throw
+  map.fire('layeradd', { layer: {} });
+  assert.strictEqual(m.n, 0, 'markers and lines never measure');
+  assert.strictEqual(s.frames.length, frames0, 'nor queue a frame');
+  map.attr.offsetHeight = 54;
+  for (let i = 0; i < 1000; i++) {
+    map.fire('layeradd', { layer: tileLayer });
+    map.fire('layerremove', { layer: tileLayer });
+  }
+  assert.strictEqual(m.n, 0, 'nothing measured inside the events');
+  assert.strictEqual(s.frames.length, frames0 + 1, 'one frame queued for 2000 events');
+  s.runFrames();
+  assert.strictEqual(map.corner.style.marginBottom, '54px', 'the lift follows the new bar');
+  assert.ok(m.n > 0 && m.n <= 3, 'one measurement pass (' + m.n + ' reads)');
+  // The next frame's events queue the next (single) pass.
+  map.attr.offsetHeight = 36;
+  map.fire('layerremove', { layer: tileLayer });
+  map.fire('layeradd', { layer: tileLayer });
+  assert.strictEqual(s.frames.length, frames0 + 1);
+  // Removed with a pass still queued: it is cancelled, the lift released.
+  layer.onRemove(map);
+  assert.strictEqual(s.frames.length, frames0, 'queued pass cancelled');
+  assert.strictEqual(map.corner.style.marginBottom, '');
+  ['resize', 'layeradd', 'layerremove'].forEach(e => assert.strictEqual((map._on[e] || []).length, 0, e));
+});
+
+test('corner lift: no attribution bar to observe falls back to the coalesced layer events', () => {
+  const s = makeSandbox({ ro: true });
+  const map = makeMap();
+  const bar = map.attr;
+  map.attributionControl = null;             // added to the map later
+  const layer = s.ctx.MC_createDuctingLayer({});
+  layer.onAdd(map);
+  assert.strictEqual(map.corner.style.marginBottom, '');
+  map.attributionControl = { getContainer: () => bar };
+  map.fire('layeradd', { layer: tileLayer });
+  s.runFrames();
+  assert.strictEqual(map.corner.style.marginBottom, '36px');
+  layer.onRemove(map);
 });
 
 // ── panel and timeline ──────────────────────────────────────────────────────
@@ -1821,7 +2131,8 @@ test('panel: one control holding header, timeline and legend body, in order, wir
   assert.strictEqual(vp.attrs['aria-valuetext'], labelText(s.layer).replace('Forecast time: ', ''));
   // Forecast-time line: the label (prefix that may shorten, the time) and Now; then ◀ strip ▶.
   const time = one(panel, 'mc-duct-time');
-  assert.deepStrictEqual(time.children.map(c => c.className), ['mc-duct-time-head', 'mc-duct-tl-row']);
+  assert.deepStrictEqual(time.children.map(c => c.className), ['mc-duct-time-head', 'mc-duct-status', 'mc-duct-tl-row']);
+  assert.deepStrictEqual([time.children[1].attrs.role, time.children[1].hidden], ['status', true], 'status line, hidden while there is nothing to say');
   const thead = time.children[0];
   assert.deepStrictEqual(thead.children.map(c => c.className), ['mc-duct-time-label', 'mc-duct-now']);
   assert.deepStrictEqual(thead.children[0].children.map(c => c.className), ['mc-duct-time-prefix', 'mc-duct-time-value']);
@@ -2111,6 +2422,178 @@ test('collapse persists; stored state is restored and overrides the narrow defau
 });
 
 // The panel docked in the corner, 260 x 300, at (10, 390) in a 1000 x 700 map.
+// Mounts with the strip not laid out (the map is in a display:none
+// wrapper): scrollWidth 0, and scrollLeft does not move.
+async function mountHidden(body, now, withRo) {
+  const s = makeSandbox();
+  const ros = [];
+  if (withRo) {
+    s.ctx.ResizeObserver = function (cb) { this.cb = cb; this.observe = (e) => { this.el = e; }; this.disconnect = () => { this.el = null; }; ros.push(this); };
+  }
+  const realNow = Date.now;
+  Date.now = () => now * 1000;
+  try {
+    const map = makeMap();
+    const layer = s.ctx.MC_createDuctingLayer({});
+    layer.onAdd(map);
+    layer._tl.scrollWidth = 0;
+    s.api.calls[0].ok(body);
+    await tick(); await tick();
+    return Object.assign(s, { map, layer, ros });
+  } finally { Date.now = realNow; }
+}
+
+test('timeline: a strip laid out late (hidden map) records no target and is positioned once it has a size', async () => {
+  // The forecast started 5 hours ago.
+  const s = await mountHidden(longBody(49), T0 + 5 * 3600 + 60);
+  const L0 = s.layer, vp = L0._tl, xs = xsOf(s);
+  assert.strictEqual(L0._idx, 5);
+  assert.strictEqual(vp.scrollLeft, 0, 'nothing to scroll yet');
+  assert.strictEqual(L0._tlTarget, null, 'no target without a layout: no scroll event would ever clear it');
+  s.settleScroll(); s.runTimeouts();
+  // Still hidden: a resize callback and a step change nothing either.
+  L0._onPanelResize();
+  L0._setIndex(6);
+  assert.deepStrictEqual([vp.scrollLeft, L0._tlTarget], [0, null]);
+  L0._setIndex(5);
+  // The wrapper is shown: the strip has a size, the panel's resize fires.
+  vp.scrollWidth = xs[48] + 200; vp.clientWidth = 200;
+  L0._onPanelResize();
+  assert.strictEqual(vp.scrollLeft, xs[5], 'the shown hour is under the centre marker');
+  s.settleScroll(); s.runTimeouts();
+  assert.strictEqual(L0._tlTarget, null);
+  assert.strictEqual(L0._idx, 5);
+  assert.ok(!L0._userPicked, 'positioning from code is not a user pick');
+  assert.strictEqual(vp.attrs['aria-valuenow'], '5');
+});
+
+test('timeline: the panel\'s ResizeObserver is what positions a late-laid-out strip', async () => {
+  const s = await mountHidden(longBody(49), T0 + 5 * 3600 + 60, true);
+  const L0 = s.layer, vp = L0._tl, xs = xsOf(s);
+  const ro = s.ros.filter(r => r.el === L0._panelEl);
+  assert.strictEqual(ro.length, 1, 'one observer on the panel');
+  ro[0].cb([]);                      // the initial callback, still hidden
+  assert.deepStrictEqual([vp.scrollLeft, L0._tlTarget], [0, null]);
+  vp.scrollWidth = xs[48] + 200; vp.clientWidth = 200;
+  ro[0].cb([]);                      // display:none lifted: 0x0 -> a size
+  assert.strictEqual(vp.scrollLeft, xs[5]);
+  s.settleScroll(); s.runTimeouts();
+  assert.deepStrictEqual([L0._tlTarget, L0._idx, !!L0._userPicked], [null, 5, false]);
+  L0.onRemove(s.map);
+  assert.strictEqual(ro[0].el, null, 'disconnected');
+});
+
+test('timeline: a code scroll that moves nothing never leaves its target behind', async () => {
+  const s = await mount(longBody(49), T0 + 60);
+  const L0 = s.layer, vp = L0._tl, xs = xsOf(s);
+  s.settleScroll(); s.runTimeouts();
+  // A smooth scroll the browser never starts, superseded by a step back
+  // to where the strip already is: no scroll event at all.
+  vp.scrollTo = () => {};
+  vp.fire('keydown', { key: 'ArrowRight' });
+  vp.fire('keydown', { key: 'ArrowLeft' });
+  assert.strictEqual(L0._tlTarget, xs[0], 'kept while a scroll may still move the strip');
+  assert.strictEqual(scrolled.size, 0, 'no scroll event is coming');
+  s.runTimeouts();
+  assert.strictEqual(L0._tlTarget, null, 'dropped by the idle timer');
+  // A target set while laid out, then the map is hidden before the strip
+  // moved: the idle timer cannot move it and drops the target.
+  vp.fire('keydown', { key: 'ArrowRight' });
+  assert.strictEqual(L0._tlTarget, xs[1]);
+  vp.scrollWidth = 0;
+  s.runTimeouts();
+  assert.deepStrictEqual([vp.scrollLeft, L0._tlTarget], [xs[0], null]);
+  // Shown again: the late-layout restore puts the picked hour under the centre.
+  vp.scrollWidth = 100000;
+  L0._onPanelResize();
+  assert.strictEqual(vp.scrollLeft, xs[1]);
+  s.settleScroll(); s.runTimeouts();
+  assert.deepStrictEqual([L0._tlTarget, L0._idx], [null, 1]);
+});
+
+// ── the hour tick ───────────────────────────────────────────────────────────
+
+test('hour tick: one timer aimed at the top of the hour moves the now line and the shown hour, without a request', async () => {
+  assert.strictEqual(T0 % 3600, 0, 'the fixture starts on the hour');
+  const realNow = Date.now;
+  const s = await mount(longBody(49), T0 + 60);
+  const L0 = s.layer, vp = L0._tl, xs = xsOf(s);
+  const nowLeft = () => parseFloat(one(L0._panelEl, 'mc-duct-now-line').style.left);
+  try {
+    assert.strictEqual(s.hourTicks().length, 1, 'one timer');
+    assert.strictEqual(s.hourTicks()[0].ms, 3540 * 1000, 'aimed at the next top of the hour');
+    assert.strictEqual(s.timers.length, 1, 'no interval besides the refresh');
+    assert.strictEqual(L0._idx, 0);
+    const calls = s.api.calls.length, left0 = nowLeft();
+    // Fired a moment early: nothing changes, re-armed for the remainder.
+    Date.now = () => (T0 + 3600) * 1000 - 2;
+    s.runHourTick();
+    assert.strictEqual(L0._idx, 0);
+    assert.deepStrictEqual(s.timeouts.map(t => t.ms), [2]);
+    // The hour turns.
+    Date.now = () => (T0 + 3600) * 1000 + 500;
+    s.timeouts.shift().fn();
+    assert.strictEqual(L0._idx, 1, 'the shown hour moved on');
+    assert.strictEqual(vp.scrollLeft, xs[1], 'and the strip with it');
+    assert.strictEqual(vp.attrs['aria-valuenow'], '1');
+    assert.ok(nowLeft() > left0, 'the now line moved');
+    assert.ok(!L0._userPicked);
+    s.settleScroll(); s.runTimeouts();
+    assert.ok(!L0._userPicked, 'the tick\'s own scroll is not a user pick');
+    assert.strictEqual(s.api.calls.length, calls, 'no request');
+    assert.strictEqual(s.hourTicks().length, 1, 're-armed, still one');
+    assert.strictEqual(s.hourTicks()[0].ms, 3600 * 1000 - 500);
+    assert.strictEqual(s.timers.length, 1);
+    // A user-picked hour stays; the now line still moves.
+    vp.fire('keydown', { key: 'End' });
+    s.settleScroll(); s.runTimeouts();
+    assert.ok(L0._userPicked && L0._idx === 48);
+    const left1 = nowLeft();
+    Date.now = () => (T0 + 2 * 3600) * 1000 + 5;
+    s.runHourTick();
+    assert.strictEqual(L0._idx, 48, 'the picked hour is left alone');
+    assert.strictEqual(vp.scrollLeft, xs[48]);
+    assert.ok(nowLeft() > left1);
+    // Now: following the clock again.
+    L0._nowEl.fire('click');
+    s.settleScroll(); s.runTimeouts();
+    assert.strictEqual(L0._idx, 2);
+    Date.now = () => (T0 + 3 * 3600) * 1000 + 5;
+    s.runHourTick();
+    assert.strictEqual(L0._idx, 3);
+    // The forecast's last hour ends: said at once, not at the next refresh.
+    assert.ok(!legendText(s).includes('out of date'));
+    Date.now = () => (T0 + 49 * 3600) * 1000 + 5;
+    s.runHourTick();
+    assert.strictEqual(statusOf(s).text, 'Forecast out of date — showing the last one received');
+    assert.strictEqual(s.api.calls.length, calls);
+    // Removing the overlay clears the timer; a callback already taken does nothing.
+    const stale = s.hourTicks()[0].fn;
+    L0.onRemove(s.map);
+    assert.strictEqual(s.timeouts.length, 0, 'timer cleared with the overlay');
+    stale();
+    assert.strictEqual(s.timeouts.length, 0, 'never re-armed after removal');
+    // Re-added: one timer again.
+    L0.onAdd(s.map);
+    assert.strictEqual(s.hourTicks().length, 1);
+    L0.onRemove(s.map);
+    assert.strictEqual(s.timeouts.length, 0);
+  } finally { Date.now = realNow; }
+});
+
+test('hour tick: runs without a forecast (nothing to move) and keeps the status', async () => {
+  const realNow = Date.now;
+  const s = await mount({ status: 'pending' }, T0 + 60);
+  try {
+    Date.now = () => (T0 + 3600) * 1000 + 5;
+    s.runHourTick();
+    assert.strictEqual(s.layer._idx, -1);
+    assert.strictEqual(statusOf(s).text, 'Ducting forecast is being prepared');
+    assert.strictEqual(s.hourTicks().length, 1);
+    assert.strictEqual(s.api.calls.length, 1);
+  } finally { Date.now = realNow; }
+});
+
 function sizePanel(s) {
   const p = s.layer._panelEl;
   p.offsetWidth = 260; p.offsetHeight = 300;
@@ -2226,12 +2709,12 @@ test('teardown: panel gone from the corner or the map container, every listener,
     s.layer._tl.scrollLeft = 55;
     flushScroll();
     s.layer._tl.fire('touchend');
-    assert.ok(s.frames.length === 1 && s.timeouts.length === 1);
+    assert.ok(s.frames.length === 1 && s.uiTimeouts().length === 1 && s.hourTicks().length === 1);
     s.layer.onRemove(s.map);
     assert.strictEqual(p.parentNode, null);
     assert.strictEqual(s.map.el.children.length + s.map.corner.children.length, 0, 'nothing left');
     assert.strictEqual(listenerCount(p), 0);
-    assert.strictEqual(s.frames.length + s.timeouts.length, 0, 'frame and timer cancelled');
+    assert.strictEqual(s.frames.length + s.timeouts.length, 0, 'frame, idle timer and hour tick cancelled');
     assert.strictEqual((s.map._on.resize || []).length, 0);
     assert.strictEqual(s.map.corner.style.marginBottom, '');
     s.layer.onAdd(s.map);
@@ -2304,6 +2787,9 @@ const BASE_BBOX = '50,-2,54,2';       // the default view 51..53 x -1..1, padded
 
 // A sandbox in grid mode: url-state.js, fake setTimeout (flushed by hand),
 // location/history, Node's AbortController and a Date whose now() is s.now.
+// The hour tick (re-armed each time it fires) is kept apart from the UI
+// timeouts: flush never runs it, runHourTick does. s.now is in whole
+// seconds, so the tick is 1 s or more away; the UI timeouts are at most 300 ms.
 function makeGridSandbox(hash) {
   const s = makeSandbox();
   const ctx = s.ctx;
@@ -2317,9 +2803,14 @@ function makeGridSandbox(hash) {
   ctx.Date = FakeDate;
   const timeouts = [];
   let tid = 1000;
-  ctx.setTimeout = (fn, ms) => { const id = tid++; timeouts.push({ id, fn, ms }); return id; };
-  ctx.clearTimeout = (id) => { const i = timeouts.findIndex(t => t.id === id); if (i >= 0) timeouts.splice(i, 1); };
+  const hourTicks = [];
+  ctx.setTimeout = (fn, ms) => { const id = tid++; (ms < 1000 ? timeouts : hourTicks).push({ id, fn, ms }); return id; };
+  ctx.clearTimeout = (id) => {
+    for (const q of [timeouts, hourTicks]) { const i = q.findIndex(t => t.id === id); if (i >= 0) q.splice(i, 1); }
+  };
   s.timeouts = timeouts;
+  s.hourTicks = () => hourTicks.slice();
+  s.runHourTick = () => { const t = hourTicks.shift(); if (t) t.fn(); };
   s.flush = () => { while (timeouts.length) timeouts.shift().fn(); };
   s.replaced = [];
   ctx.location = { hash: hash == null ? '#/map' : hash };
@@ -2674,9 +3165,11 @@ test('grid: on add fetches meta and links (historyDays), not /api/ducting; defau
 test('grid: the window for view + time is fetched once after the debounce, bbox padded and rounded', async () => {
   const s = await mountGrid({ window: false });
   assert.strictEqual(callsTo(s, '/api/ducting/grid').length, 0, 'debounced');
-  assert.deepStrictEqual(s.timeouts.map(t => t.ms), [250]);
+  // (The strip's own idle timer, 120 ms, is queued too.)
+  const debounces = () => s.timeouts.filter(t => t.ms === 250);
+  assert.strictEqual(debounces().length, 1);
   s.map.fire('moveend'); s.map.fire('zoomend');
-  assert.strictEqual(s.timeouts.length, 1, 'rapid events coalesce');
+  assert.strictEqual(debounces().length, 1, 'rapid events coalesce');
   s.flush();
   assert.deepStrictEqual(callsTo(s, '/api/ducting/grid').map(c => c.url), ['/api/ducting/grid?t=' + GT + '&bbox=' + BASE_BBOX + '&run=' + GMETA.runTime]);
   lastCall(s, '/api/ducting/grid').ok(clone(GWIN));
@@ -3060,12 +3553,22 @@ test('grid: pending meta retries every minute and shows the preparing message; o
   const s = await mountGrid({ meta: false, links: false });
   callsTo(s, '/api/ducting/meta')[0].ok({ status: 'pending' });
   await settle();
-  assert.ok(legendText(s).indexOf(MSG_PENDING_TEXT) >= 0);
+  // On the status line, outside the collapsible legend (statusOf checks where).
+  assert.strictEqual(statusOf(s).text, MSG_PENDING_TEXT);
   assert.deepStrictEqual(s.timers.map(t => t.ms), [60000]);
   s.timers[0].fn();
   lastCall(s, '/api/ducting/meta').ok(clone(GMETA));
   await settle();
+  assert.strictEqual(statusOf(s).text, '');
   assert.deepStrictEqual(s.timers.map(t => t.ms), [600000]);
+});
+
+test('grid: the status line says loading, then unavailable when the first meta request fails', async () => {
+  const s = await mountGrid({ meta: false, links: false });
+  assert.strictEqual(statusOf(s).text, 'Loading ducting forecast');
+  callsTo(s, '/api/ducting/meta')[0].fail();
+  await settle();
+  assert.strictEqual(statusOf(s).text, 'Ducting forecast unavailable');
 });
 const MSG_PENDING_TEXT = 'Ducting forecast is being prepared';
 
@@ -3074,7 +3577,7 @@ test('grid: out of date on a failed meta refresh (data stays) and once the last 
   s.timers[0].fn();
   lastCall(s, '/api/ducting/meta').fail();
   await settle();
-  assert.ok(legendText(s).indexOf('Forecast out of date') >= 0);
+  assert.strictEqual(statusOf(s).text, 'Forecast out of date \u2014 showing the last one received');
   assert.ok(s.map._layers.indexOf(s.layer._field) >= 0);
   assert.deepStrictEqual(s.timers.map(t => t.ms), [60000], 'asks again every minute');
   const last = GMETA.times[GMETA.times.length - 1];
@@ -3082,6 +3585,54 @@ test('grid: out of date on a failed meta refresh (data stays) and once the last 
   assert.ok(legendText(e).indexOf('Forecast out of date') < 0, 'not before last + 3 h');
   const x = await mountGrid({ now: last + 3 * 3600 });
   assert.ok(legendText(x).indexOf('Forecast out of date') >= 0);
+  // The hour tick says so at once, not at the next meta refresh.
+  e.now = last + 3 * 3600;
+  e.runHourTick();
+  assert.strictEqual(statusOf(e).text, 'Forecast out of date \u2014 showing the last one received');
+});
+
+test('grid: the hour tick moves the now line, the "ago" label and the shown time on with the clock, not a picked time', async () => {
+  const s = await mountGrid();           // now = GT + 1 h
+  const L0 = s.layer;
+  const nowLeft = () => parseFloat(one(L0._panelEl, 'mc-duct-now-line').style.left);
+  assert.deepStrictEqual(s.hourTicks().map(t => t.ms), [3600 * 1000], 'one timer, aimed at the next hour');
+  const calls = s.api.calls.length, left0 = nowLeft();
+  // An hour on, still inside the same 3-hour step: no request.
+  s.now = GT + 2 * 3600;
+  s.runHourTick();
+  s.settleScroll(); s.flush();
+  assert.strictEqual(L0._sel, 8);
+  assert.ok(/ · analysis, 2 h ago$/.test(labelText(L0)), labelText(L0));
+  assert.strictEqual(L0._tl.attrs['aria-valuetext'], L0._timeValue.textContent);
+  assert.ok(nowLeft() > left0, 'the now line moved');
+  assert.strictEqual(s.api.calls.length, calls, 'no request');
+  assert.strictEqual(s.hourTicks().length, 1, 're-armed, still one');
+  // The next step begins: it is shown, and its window fetched.
+  s.now = GMETA.times[9];
+  s.runHourTick();
+  assert.strictEqual(L0._sel, 9, 'the shown time moved on');
+  assert.strictEqual(L0._tl.scrollLeft, xsOf(s)[9], 'and the strip with it');
+  s.settleScroll(); s.flush();
+  assert.ok(!L0._userPicked, 'the tick\'s own scroll is not a user pick');
+  assert.strictEqual(s.replaced.length, 0, 'nor written to the link');
+  assert.ok(lastCall(s, '/api/ducting/grid').url.indexOf('t=' + GMETA.times[9] + '&') >= 0, lastCall(s, '/api/ducting/grid').url);
+  const w = clone(GWIN); w.times = [GMETA.times[9]];
+  lastCall(s, '/api/ducting/grid').ok(w);
+  await settle();
+  // A picked time stays; the now line still moves.
+  slide(s, 3); s.flush();
+  assert.ok(L0._userPicked && L0._sel === 3);
+  const left1 = nowLeft();
+  s.now = GMETA.times[10];
+  s.runHourTick();
+  assert.strictEqual(L0._sel, 3, 'the picked time is left alone');
+  assert.ok(nowLeft() > left1);
+  // Removing the overlay clears the timer; a callback already taken does nothing.
+  const stale = s.hourTicks()[0].fn;
+  L0.onRemove(s.map);
+  assert.strictEqual(s.hourTicks().length, 0, 'timer cleared with the overlay');
+  stale();
+  assert.strictEqual(s.hourTicks().length, 0, 'never re-armed after removal');
 });
 
 test('grid: a failed window keeps the previous image and says so; the next success clears it', async () => {
@@ -3090,7 +3641,7 @@ test('grid: a failed window keeps the previous image and says so; the next succe
   slide(s, 9); s.flush();
   lastCall(s, '/api/ducting/grid').fail();
   await settle();
-  assert.ok(legendText(s).indexOf('Could not load ducting data for this area') >= 0);
+  assert.strictEqual(statusOf(s).text, 'Could not load ducting data for this area');
   assert.ok(s.map._layers.indexOf(field) >= 0);
   slide(s, 10); s.flush();
   lastCall(s, '/api/ducting/grid').ok({ status: 'error', error: 'busy', cells: [], times: [] });
@@ -3100,7 +3651,7 @@ test('grid: a failed window keeps the previous image and says so; the next succe
   const w = clone(GWIN); w.times = [GMETA.times[11]];
   lastCall(s, '/api/ducting/grid').ok(w);
   await settle();
-  assert.ok(legendText(s).indexOf('Could not load ducting data for this area') < 0);
+  assert.strictEqual(statusOf(s).text, '');
 });
 
 test('grid: a view on another world copy draws the window, LoRa outline and links shifted onto it', async () => {

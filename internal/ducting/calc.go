@@ -56,10 +56,15 @@ func clampRH(rh float64) float64 {
 
 // Profile builds the ascending profile from a surface point (2 m values)
 // and pressure-level data. Slices may differ in length (the shortest wins)
-// and may hold NaN for missing values; unusable levels are skipped. Levels at
-// or below ground, at or below the surface point, or above MaxHeightAGL
-// are dropped. When surfPHPa is not finite the pressure-below-ground check is
-// skipped and only the height check applies.
+// and may hold NaN for missing values; unusable levels are skipped. Levels
+// below ground, less than MinLevelGapM above the surface point, or above
+// MaxHeightAGL are dropped.
+//
+// The profile starts at the 2 m point or is empty: when a 2 m value is
+// missing or out of range there is no surface to measure a gradient or a
+// duct from, and the lowest pressure level must not stand in for it (that
+// would call an elevated layer surface-based and take the mean gradient
+// from the wrong height). Analyze reports an empty profile as no data.
 func Profile(elevation, surfPHPa, t2mC, rh2mPct float64, levelsHPa, tempsC, rhsPct, geoHeightsM []float64) []Level {
 	n := shortest(len(levelsHPa), len(tempsC), len(rhsPct), len(geoHeightsM))
 	return profileInto(make([]Level, 0, n+1), elevation, surfPHPa, t2mC, rh2mPct, levelsHPa, tempsC, rhsPct, geoHeightsM)
@@ -67,32 +72,32 @@ func Profile(elevation, surfPHPa, t2mC, rh2mPct float64, levelsHPa, tempsC, rhsP
 
 // profileInto is Profile appending to out (len 0, any capacity).
 func profileInto(out []Level, elevation, surfPHPa, t2mC, rh2mPct float64, levelsHPa, tempsC, rhsPct, geoHeightsM []float64) []Level {
-	n := shortest(len(levelsHPa), len(tempsC), len(rhsPct), len(geoHeightsM))
-	if saneLevel(surfPHPa, t2mC, rh2mPct) {
-		out = append(out, Level{
-			HeightAGL:   SurfaceHeightM,
-			PressureHPa: surfPHPa,
-			TempC:       t2mC,
-			RHPct:       clampRH(rh2mPct),
-		})
+	if !saneLevel(surfPHPa, t2mC, rh2mPct) {
+		return out
 	}
-	surfOK := finite(surfPHPa)
+	n := shortest(len(levelsHPa), len(tempsC), len(rhsPct), len(geoHeightsM))
+	out = append(out, Level{
+		HeightAGL:   SurfaceHeightM,
+		PressureHPa: surfPHPa,
+		TempC:       t2mC,
+		RHPct:       clampRH(rh2mPct),
+	})
 	for i := 0; i < n; i++ {
 		p, t, rh, z := levelsHPa[i], tempsC[i], rhsPct[i], geoHeightsM[i]
 		if !saneLevel(p, t, rh) || !finite(z) || !finite(elevation) {
 			continue
 		}
-		if surfOK && p >= surfPHPa {
+		if p >= surfPHPa {
 			continue
 		}
 		h := z - elevation
-		if h <= SurfaceHeightM || h > MaxHeightAGL {
+		if h < SurfaceHeightM+MinLevelGapM || h > MaxHeightAGL {
 			continue
 		}
 		out = append(out, Level{HeightAGL: h, PressureHPa: p, TempC: t, RHPct: clampRH(rh)})
 	}
-	// Stable so that, among equal heights, the surface point (appended first)
-	// is the one kept by the de-duplication below.
+	// Stable so that, among levels at one height, the first given is the one
+	// kept by the de-duplication below.
 	slices.SortStableFunc(out, func(a, b Level) int {
 		switch {
 		case a.HeightAGL < b.HeightAGL:
@@ -113,7 +118,9 @@ func profileInto(out []Level, elevation, surfPHPa, t2mC, rh2mPct float64, levels
 }
 
 // Analyze computes N and M for each level of an ascending profile and
-// classifies it (see analyzeM).
+// classifies it (see analyzeM). A profile that does not start at the 2 m
+// surface point (Profile's are empty then) is no data: every height and
+// gradient below is measured from that point.
 func Analyze(profile []Level) Result {
 	n := len(profile)
 	return analyzeInto(profile, make([]float64, n), make([]float64, n), make([]float64, n))
@@ -148,6 +155,9 @@ func (s *Scratch) Analyze(profile []Level) Result {
 
 // analyzeInto fills h, m, n (each len(profile)) and classifies the profile.
 func analyzeInto(profile []Level, h, m, n []float64) Result {
+	if len(profile) == 0 || profile[0].HeightAGL != SurfaceHeightM {
+		return Result{Class: ClassNoData}
+	}
 	for i, l := range profile {
 		h[i] = l.HeightAGL
 		n[i] = Refractivity(l.PressureHPa, l.TempC, l.RHPct)

@@ -399,6 +399,16 @@ func TestDuctingETagListMatches(t *testing.T) {
 			t.Errorf("%q: matched", h)
 		}
 	}
+	// The route's own tag may be weak (GET /api/ducting): W/ is ignored on
+	// that side too.
+	for _, h := range []string{tag, "W/" + tag, `"a", ` + tag} {
+		if !ductingETagListMatches(h, "W/"+tag) {
+			t.Errorf("%q against a weak tag: no match", h)
+		}
+	}
+	if ductingETagListMatches(`"x"`, "W/"+tag) {
+		t.Error(`"x" matched a weak tag`)
+	}
 }
 
 func TestDuctingGridLRUBound(t *testing.T) {

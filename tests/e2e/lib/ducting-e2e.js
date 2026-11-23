@@ -9,9 +9,31 @@
 const MH = require('./map-harness');
 
 // The LoRa frequencies the overlay judges (map-ducting.js loraFreqs): the
-// site's los.frequencyMhz from /api/config/client when it is 100..6000 MHz,
-// else 868 and 915 MHz.
-const loraFreqsOf = (cfg) => { const f = Number(cfg && cfg.los && cfg.los.frequencyMhz); return (f >= 100 && f <= 6000) ? [f] : [868, 915]; };
+// site's los.frequencyMhz from /api/config/client when it is 100..6000 MHz
+// and not the shipped default 910.525 (not the operator's choice), else 868
+// and 915 MHz.
+const loraFreqsOf = (cfg) => { const f = Number(cfg && cfg.los && cfg.los.frequencyMhz); return (f >= 100 && f <= 6000 && Math.abs(f - 910.525) >= 0.0005) ? [f] : [868, 915]; };
+// The /api/ducting answer `d` with its times moved so the first one is
+// `startHoursAgo` whole hours before the current hour.
+const shifted = (d, startHoursAgo) => {
+  const hour = Math.floor(Date.now() / 3600000) * 3600, by = hour - startHoursAgo * 3600 - d.times[0];
+  return Object.assign({}, d, { times: d.times.map(t => t + by) });
+};
+// The panel's status line as a user sees it: text of the visible
+// role=status elements, how many there are, whether one sits in the legend.
+const inPageStatus = () => {
+  const p = document.querySelector('.mc-duct-panel');
+  if (!p) return null;
+  const vis = (el) => { const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'; };
+  const all = Array.prototype.slice.call(p.querySelectorAll('[role="status"]'));
+  const r = p.getBoundingClientRect();
+  return {
+    count: all.length, text: all.filter(vis).map(e => e.textContent).join(' | '),
+    inLegend: all.some(e => !!e.closest('.mc-duct-legend')),
+    legend: vis(p.querySelector('.mc-duct-legend')),
+    inView: r.left >= 0 && r.top >= 0 && r.right <= window.innerWidth && r.bottom <= window.innerHeight,
+  };
+};
 // f_min as the popup shows it (2 significant figures); verdicts use this value.
 const sig2 = (v) => Number(Number(v).toPrecision(2));
 const shownFmin = (c, h) => (c.c[h] >= 3 && c.f[h] > 0) ? sig2(c.f[h]) : 0;
@@ -406,7 +428,7 @@ function inPagePanel() {
 const panelState = (page) => page.evaluate(inPagePanel);
 
 module.exports = {
-  loraFreqsOf, sig2, shownFmin, fmtFreq, STOP_N, fieldN, stopBetween,
+  loraFreqsOf, shifted, inPageStatus, sig2, shownFmin, fmtFreq, STOP_N, fieldN, stopBetween,
   assert, sleep, createRunner,
   IGNORED_CONSOLE, newPage, gotoRoute, openPicker, setOverlayUi,
   inPageState, pageState, waitCells, inPageOverlaps, cssVars, inPageFieldProbe,

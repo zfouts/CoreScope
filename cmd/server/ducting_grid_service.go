@@ -463,6 +463,7 @@ func ductingETagListMatches(header, etag string) bool {
 	if h == "*" {
 		return true
 	}
+	etag = strings.TrimPrefix(etag, "W/")
 	for {
 		h = strings.TrimLeft(h, " \t,")
 		if h == "" {

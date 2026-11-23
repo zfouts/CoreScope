@@ -145,10 +145,15 @@
   var RETRY_MS = 60 * 1000;
   // A duct "may carry LoRa" at a frequency when its lowest trapped frequency
   // (as shown, two significant figures) is at most that frequency: this
-  // site's LoRa frequency when the server sets one (los.frequencyMhz), else
+  // site's LoRa frequency when the operator set one (los.frequencyMhz), else
   // 868 and 915 MHz each. With model levels ~200 m apart it is an estimate.
   var BAND_868 = 868;           // LoRa bands judged when the site's frequency is unknown
   var BAND_915 = 915;
+  // los.frequencyMhz as shipped (cmd/server/los_config.go, config.example.json).
+  // The server sends it whenever line of sight is on, so this value alone
+  // does not say the operator chose it: an EU site that never touched the
+  // setting would be judged at 910.525 MHz only. Treated as not set.
+  var LOS_DEFAULT_MHZ = 910.525;
   var TYPE_NAME = { 0: 'No data', 1: 'Normal', 2: 'Super-refraction', 3: 'Elevated duct', 4: 'Surface-based duct' };
 
   // Colour bands: --mc-duct-sN colours n (mean dN/dh over the lowest 1.5 km,
@@ -188,10 +193,11 @@
   var MINUS = '\u2212';
 
   var NOTE = 'Indicator only: model levels are ~200 m apart, so thinner ducts are not visible.';
+  var MSG_LOADING = 'Loading ducting forecast';
   var MSG_PENDING = 'Ducting forecast is being prepared';
   var MSG_ERROR = 'Ducting forecast unavailable';
   var MSG_STALE = 'Forecast out of date \u2014 showing the last one received';
-  // 'Dashed outline: … LoRa at 910.525 MHz' (this site) or '868 / 915 MHz'.
+  // 'Dashed outline: … LoRa at 869.525 MHz' (this site) or '868 / 915 MHz'.
   function msgLoraRow() {
     return 'Dashed outline: the model shows a duct that may carry LoRa at ' + loraFreqs().map(function (f) { return Math.round(f * 1000) / 1000; }).join(' / ') + ' MHz';
   }
@@ -425,12 +431,14 @@
   function sig2(v) { return Number(Number(v).toPrecision(2)); }
 
   // The LoRa frequencies to judge a duct against: this site's own (the line
-  // of sight setting, /api/config/client los.frequencyMhz) when the server
-  // has one, else both common bands. In MHz, ascending.
+  // of sight setting, /api/config/client los.frequencyMhz) when the operator
+  // set one, else both common bands: no line of sight config, a value out
+  // of range, or the shipped default (LOS_DEFAULT_MHZ). In MHz, ascending.
   function loraFreqs() {
     var c = (typeof window !== 'undefined' && window.MC_LOS_CFG) || null;
     var f = c ? Number(c.frequencyMhz) : NaN;
-    return (f >= 100 && f <= 6000) ? [f] : [BAND_868, BAND_915];
+    var chosen = f >= 100 && f <= 6000 && Math.abs(f - LOS_DEFAULT_MHZ) >= 0.0005;
+    return chosen ? [f] : [BAND_868, BAND_915];
   }
 
   // A duct's lowest trapped frequency as shown (two significant figures):
@@ -1446,10 +1454,11 @@
           // Kept data is drawn at once, so a re-add never shows a blank map while
           // the refetch is pending or failing; the refetch below replaces it.
           if (this._data) this._show();
-          else this._renderLegend();
+          else { this._renderLegend(); this._renderStatus(); }
           this._load(gen);
           this._schedule(REFRESH_MS);
         }
+        this._armHourTick();
         var self = this;
         // Colours are read from CSS variables, so a theme switch needs a redraw.
         this._onTheme = function () {
@@ -1463,6 +1472,8 @@
         this._gen++;                       // in-flight results are ignored
         if (this._timer != null) { try { clearInterval(this._timer); } catch (_) {} this._timer = null; }
         this._timerMs = 0;
+        cancelLater(this._hourTimer);
+        this._hourTimer = null;
         if (this._abort) { try { this._abort.abort(); } catch (_) {} this._abort = null; }
         var m = map || this._map;
         if (this._onTheme) { try { window.removeEventListener('theme-changed', this._onTheme); } catch (_) {} this._onTheme = null; }
@@ -1474,7 +1485,6 @@
         if (this._field && m) { try { m.removeLayer(this._field); } catch (_) {} }
         if (this._renderer && m) { try { m.removeLayer(this._renderer); } catch (_) {} }
         this._map = this._group = this._renderer = this._field = this._canvas = this._grid = this._img = null;
-        this._statusEl = this._metaEl = null;
         this._cells = [];
         this._edge = this._lora = null;
         this._loraKey = '';
@@ -1666,12 +1676,21 @@
         row.appendChild(next);
         thead.appendChild(label);
         thead.appendChild(now);
+        // Loading / being prepared / unavailable / out of date (grid mode
+        // also: this view's window failed): under the forecast-time line,
+        // outside the legend, so a collapsed panel (the default on phones)
+        // still says so. One live region, hidden while there is nothing to say.
+        var status = el('div', 'mc-duct-status');
+        status.setAttribute('role', 'status');
+        status.hidden = true;
         time.appendChild(thead);
+        time.appendChild(status);
         time.appendChild(row);
         panel.appendChild(time);
         this._timeLabel = label;
         this._timePrefix = prefix;
         this._timeValue = value;
+        this._statusEl = status;
         this._tl = vp;
         this._tlTrack = track;
         this._tlInner = inner;
@@ -1714,7 +1733,7 @@
         // or, moved, the map container); a gone map may throw first.
         if (this._panelCtl) { try { this._panelCtl.remove(); } catch (_) {} }
         if (p && p.parentNode && p.parentNode.removeChild) { try { p.parentNode.removeChild(p); } catch (_) {} }
-        this._panelCtl = this._panelEl = this._legendEl = this._timeLabel = this._timePrefix = this._timeValue = null;
+        this._panelCtl = this._panelEl = this._legendEl = this._timeLabel = this._timePrefix = this._timeValue = this._statusEl = null;
         this._dragEl = this._resetEl = this._collapseEl = this._prevEl = this._nextEl = this._nowEl = null;
         this._tl = this._tlTrack = this._tlInner = this._tlNow = this._tlLayout = null;
         this._onMapResize = this._tlFrame = this._tlIdleTimer = this._drag = this._tlDrag = null;
@@ -2074,9 +2093,14 @@
           // Code's scroll stopped short (a smooth scroll superseded or cut
           // off): finish it at once. The target stays until the strip is
           // there, so the jump's own scroll event is not a user pick.
-          var vp = this._tl;
-          if (vp && Math.abs((vp.scrollLeft || 0) - this._tlTarget) >= 1) vp.scrollLeft = this._tlTarget;
-          else this._tlTarget = null;
+          // A strip that does not go there (no layout any more) fires
+          // no such event: the target is dropped.
+          var vp = this._tl, x = this._tlTarget;
+          var away = function () { return Math.abs((vp.scrollLeft || 0) - x) >= 1; };
+          if (vp && away()) {
+            vp.scrollLeft = x;
+            if (away()) this._tlTarget = null;
+          } else this._tlTarget = null;
           return;
         }
         cancelFrame(this._tlFrame);
@@ -2089,10 +2113,13 @@
       _tlScrollTo: function (i, smooth) {
         var vp = this._tl, lay = this._tlLayout;
         if (!vp || !lay || !(i >= 0) || i >= lay.xs.length) return;
+        // Not laid out (the map or panel is hidden): nothing can scroll, so
+        // no target is recorded, as no scroll event would ever clear it.
+        // _onPanelResize positions the strip once it has a size.
+        if (!vp.scrollWidth) { this._tlTarget = null; return; }
         var x = lay.xs[i];
-        var max = (vp.scrollWidth || 0) - (vp.clientWidth || 0);
-        if (max > 0) x = Math.min(Math.max(x, 0), max);
-        else if (vp.scrollWidth) x = 0;          // laid out, nothing to scroll
+        var max = vp.scrollWidth - (vp.clientWidth || 0);
+        x = max > 0 ? Math.min(Math.max(x, 0), max) : 0;   // max <= 0: nothing to scroll
         // A code scroll still in flight (rapid keys or buttons): jump, never
         // start a second smooth scroll, and never drop the target while the
         // first one may still be moving the strip. Otherwise its remaining
@@ -2100,6 +2127,10 @@
         var inFlight = this._tlTarget != null;
         if (!inFlight && Math.abs((vp.scrollLeft || 0) - x) < 1) return;
         this._tlTarget = x;
+        // The target is cleared by the scroll's own events (_tlOnScroll,
+        // _tlIdle). Should none come (a scroll that moved nothing), the
+        // idle timer still runs _tlIdle, so a target never outlives it.
+        this._tlIdleLater();
         if (smooth && !inFlight && !reducedMotion() && typeof vp.scrollTo === 'function') {
           try { vp.scrollTo({ left: x, behavior: 'smooth' }); return; } catch (_) {}
         }
@@ -2226,27 +2257,44 @@
       // The bottom-left corner shares the map's bottom edge with Leaflet's
       // attribution bar, which wraps to several lines on narrow screens.
       // Lift the corner by the bar's measured height whenever the two overlap
-      // horizontally; re-measured on resize, layer changes and bar resizes.
+      // horizontally; re-measured when the map or the bar resizes.
       // A moved panel is not in the corner: no lift.
+      //
+      // Measuring forces a layout, so it never runs per layer: the map fires
+      // layeradd/layerremove for every marker and line (thousands on the Map
+      // and Live pages). Only where the bar cannot be observed (no
+      // ResizeObserver, or no bar yet) are layer events used, and then only
+      // those of layers that carry attribution, at most once per frame.
       _watchAttribution: function (map) {
         var self = this;
         this._lift = function () { self._applyLift(); };
-        try { map.on('resize layeradd layerremove', this._lift); } catch (_) {}
+        try { map.on('resize', this._lift); } catch (_) {}
         try {
           var attr = this._attrEl();
           if (attr && typeof ResizeObserver === 'function') {
             this._ro = new ResizeObserver(this._lift);
             this._ro.observe(attr);
           }
-        } catch (_) {}
+        } catch (_) { this._ro = null; }
+        if (!this._ro) {
+          this._liftLayer = function (e) {
+            var l = e && e.layer;
+            if (self._liftFrame || !l || typeof l.getAttribution !== 'function' || !l.getAttribution()) return;
+            self._liftFrame = frame(function () { self._liftFrame = null; self._applyLift(); });
+          };
+          try { map.on('layeradd layerremove', this._liftLayer); } catch (_) {}
+        }
         this._applyLift();
       },
 
       _unwatchAttribution: function (map) {
         if (this._ro) { try { this._ro.disconnect(); } catch (_) {} this._ro = null; }
-        if (this._lift && map) { try { map.off('resize layeradd layerremove', this._lift); } catch (_) {} }
+        if (this._lift && map) { try { map.off('resize', this._lift); } catch (_) {} }
+        if (this._liftLayer && map) { try { map.off('layeradd layerremove', this._liftLayer); } catch (_) {} }
+        cancelFrame(this._liftFrame);
+        this._liftFrame = null;
         if (this._corner) { try { this._corner.style.marginBottom = ''; } catch (_) {} }
-        this._lift = this._corner = null;
+        this._lift = this._liftLayer = this._corner = null;
       },
 
       _attrEl: function () {
@@ -2307,6 +2355,28 @@
         } catch (_) { /* not laid out (no map container): leave it */ }
       },
 
+      // What the status line says now: no forecast held (loading, being
+      // prepared, unavailable), the held one is out of date, or (grid mode)
+      // the window for this view failed; '' = nothing. Grid mode: the meta
+      // answer is what is "held"; windows come and go.
+      _statusText: function () {
+        var grid = this._gridMode;
+        if (!(grid ? this._meta : this._data)) return this._state === 'pending' ? MSG_PENDING : this._state === 'error' ? MSG_ERROR : MSG_LOADING;
+        return this._stale ? MSG_STALE : (grid && this._winErr) ? MSG_WINDOW_ERROR : '';
+      },
+
+      // The status line (see _buildPanel); touched only when its text changes.
+      _renderStatus: function () {
+        var st = this._statusEl;
+        if (!st) return;
+        var msg = this._statusText();
+        if (st.textContent === msg && st.hidden === !msg) return;
+        st.textContent = msg;
+        st.hidden = !msg;
+        // A moved panel that grew stays inside the map (no ResizeObserver: now).
+        if (!this._panelRo) this._placePanel();
+      },
+
       _renderLegend: function () {
         var box = this._legendEl;
         if (!box) return;
@@ -2316,16 +2386,7 @@
         var grid = this._gridMode;
         // Grid mode: the meta answer is what is "held"; windows come and go.
         var d = grid ? this._meta : this._data;
-        if (!d) {
-          var st = el('div', 'mc-duct-legend-status', this._state === 'pending' ? MSG_PENDING : this._state === 'error' ? MSG_ERROR : 'Loading ducting forecast');
-          st.setAttribute('role', 'status');
-          box.appendChild(st);
-        } else {
-          if (this._stale || (grid && this._winErr)) {
-            var old = el('div', 'mc-duct-legend-status', this._stale ? MSG_STALE : MSG_WINDOW_ERROR);
-            old.setAttribute('role', 'status');
-            box.appendChild(old);
-          }
+        if (d) {
           box.appendChild(this._scale());
           var lrow = el('div', 'mc-duct-legend-row');
           lrow.appendChild(el('span', 'mc-duct-swatch mc-duct-swatch-lora'));
@@ -2466,8 +2527,11 @@
         p.then(function (d) {
           if (gen !== self._gen) return;
           self._apply(d);
-        }, function () {
+        }, function (e) {
           if (gen !== self._gen) return;
+          // Aborted by the next _load (same generation): not a failure, its
+          // answer is the one that counts.
+          if (e && e.name === 'AbortError') return;
           self._fail('error');
         });
       },
@@ -2492,7 +2556,7 @@
         }
         this._schedule(RETRY_MS);
         this._state = state;
-        this._renderLegend();
+        this._renderStatus();
       },
 
       // The held forecast has run out: its last hour has ended.
@@ -2502,13 +2566,12 @@
         return !!(t && t.length && Number(t[t.length - 1]) + span <= Date.now() / 1000);
       },
 
-      // Out-of-date flag (always on once the forecast has run out); the
-      // legend is redrawn only when it changes.
+      // Out-of-date flag (always on once the forecast has run out).
       _setStale: function (on) {
         on = !!on || this._expired();
         if (on === !!this._stale) return;
         this._stale = on;
-        this._renderLegend();
+        this._renderStatus();
       },
 
       _apply: function (d) {
@@ -2522,16 +2585,41 @@
           // The forecast already drawn: no rebuild (an open popup stays
           // open); only the hour moves on, unless the user picked one.
           this._setStale(false);
-          this._tlPlaceNow();
-          if (!this._userPicked) {
-            var idx = ductTimeIndex(held.times, Date.now() / 1000);
-            if (idx !== this._idx) this._setIndex(idx);
-          }
+          this._followClock();
           return;
         }
         this._data = d;
         this._stale = this._expired();
         this._show();
+      },
+
+      // The clock has moved on (a refresh, or the hour tick): the now line
+      // follows, and so does the shown hour unless the user picked one.
+      _followClock: function () {
+        if (this._gridMode) { this._followClockGrid(); return; }
+        var d = this._data;
+        if (!d) return;
+        this._tlPlaceNow();
+        if (this._userPicked) return;
+        var idx = ductTimeIndex(d.times, Date.now() / 1000);
+        if (idx !== this._idx) this._setIndex(idx);
+      },
+
+      // One timer aimed at the next top of the hour (forecast times are
+      // whole hours), re-armed each time it fires: without it the shown
+      // hour and the now line would wait for the next refresh, up to
+      // REFRESH_MS late. No request is made. A timer that fires a moment
+      // early changes nothing and is re-armed for the remainder.
+      _armHourTick: function () {
+        var self = this, gen = this._gen;
+        cancelLater(this._hourTimer);
+        this._hourTimer = later(function () {
+          self._hourTimer = null;
+          if (gen !== self._gen) return;
+          self._armHourTick();
+          self._setStale(self._stale);     // the forecast may have just run out
+          self._followClock();
+        }, HOUR_S * 1000 - Date.now() % (HOUR_S * 1000));
       },
 
       // Draws the held forecast: cells, timeline, legend and the hour (a
@@ -2541,12 +2629,14 @@
         var prevTime = this._shown != null ? this._shown : null;
         this._build();
         var idx = ductTimeIndex(d.times, Date.now() / 1000);
-        if (this._userPicked && prevTime != null) {
-          var keep = d.times.indexOf(prevTime);
+        if (this._userPicked) {
+          var keep = prevTime != null ? d.times.indexOf(prevTime) : -1;
           if (keep >= 0) idx = keep;
+          else this._userPicked = false;   // that hour is gone: follow the clock again
         }
         this._tlBuild();
         this._renderLegend();
+        this._renderStatus();
         this._setIndex(idx);
         this._tlState();
       },
@@ -2608,7 +2698,7 @@
         try { map.on('moveend zoomend', this._onView); } catch (_) {}
         if (this._data && this._dataBox) this._applyWindow(this._data, this._dataKey, this._dataBox);
         if (this._meta) this._showMeta(null);
-        else this._renderLegend();
+        else { this._renderLegend(); this._renderStatus(); }
         this._load(gen);
         this._schedule(this._meta ? GRID_REFRESH_MS : RETRY_MS);
       },
@@ -2665,7 +2755,7 @@
         this._schedule(RETRY_MS);
         if (this._meta) { this._setStale(state === 'error' || this._stale); return; }
         this._state = state;
-        this._renderLegend();
+        this._renderStatus();
       },
 
       _applyMeta: function (m) {
@@ -2714,8 +2804,25 @@
         }
         this._tlBuild();
         this._renderLegend();
+        this._renderStatus();
         this._setTime(idx);
         this._tlState();
+      },
+
+      // Grid mode's _followClock (the hour tick; a meta refresh goes through
+      // _showMeta): the now line follows, and the shown time moves to the
+      // latest step <= now unless the user picked one. The time label is
+      // relative to now ("analysis, 6 h ago"), so it is rewritten either way.
+      _followClockGrid: function () {
+        var m = this._meta;
+        if (!m) return;
+        this._tlPlaceNow();
+        var now = Date.now() / 1000;
+        var i = this._userPicked ? this._sel : ductTimeIndex(m.times, now);
+        if (i !== this._sel) { this._setTime(i); return; }
+        if (i < 0) return;
+        this._tlLabel('', timeLabel(m.times[i], now));
+        this._tlAria();
       },
 
       // The user picked time i on the timeline (scroll: at most once per
@@ -2844,7 +2951,7 @@
         on = !!on;
         if (on === !!this._winErr) return;
         this._winErr = on;
-        this._renderLegend();
+        this._renderStatus();
       },
 
       // Draws a window answer (one time: index 0) for box. The field canvas
