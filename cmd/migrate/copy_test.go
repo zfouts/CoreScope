@@ -151,6 +151,10 @@ func newSource(t testing.TB, path string, migrations []string) {
 		VALUES (3, 'ff01', 'c1', '2025-03-01', '2025-03-01', 'Gipfel ⛰', NULL, NULL, NULL, -5)`)
 	mustExec(t, db, `INSERT INTO node_declared_regions (id, target, rx_pubkey, observed_at, ingested_at, regions_csv, truncated, lat, lon, pos_acc_m, repeater_clock)
 		VALUES (12, 'ff01', 'c1', '2025-03-01', '2025-03-01', '#zh,#ch', 0, 47.0, 8.0, NULL, NULL)`)
+
+	// Ducting grid: the only BLOB column; NUL, backslash, quote and high bytes.
+	mustExec(t, db, `INSERT INTO ducting_grid (model, valid_time, run_time, lead_hours, data, created_at) VALUES ('gfs', 1740823200, 1740812400, 3, ?, 1740813000), ('gfs', 1740834000, 1740812400, 6, ?, 1740813000), ('Gfs', 1740823200, ?, 0, ?, 1740813000)`,
+		[]byte{0, 1, '\\', '\'', 0xff, 0x80, 0}, []byte("DCT1"), int64(math.MaxInt64), []byte{0})
 	db.Close()
 }
 
