@@ -105,6 +105,17 @@ func main() {
 	if err != nil {
 		log.Printf("[config] warning: %v (using defaults)", err)
 	}
+	// Location privacy (location_privacy.go): an enabled block with a short
+	// secret or an out-of-range radius never starts. The error never
+	// contains the secret.
+	locFuzz, err := newLocationFuzzer(cfg.LocationPrivacy)
+	if err != nil {
+		log.Fatalf("[privacy] refusing to start: %v", err)
+	}
+	cfg.setLocationFuzzer(locFuzz)
+	if locFuzz.Enabled() {
+		log.Printf("[privacy] location privacy on: positions approximate within %g m", locFuzz.RadiusM())
+	}
 	warnClientRxAppURL(cfg)
 
 	// CLI flags override config

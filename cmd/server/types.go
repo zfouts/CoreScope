@@ -1147,6 +1147,9 @@ type ClientConfigResponse struct {
 	LOS *LOSClientConfig `json:"los,omitempty"`
 	// Present only when planner.enabled (planner_config.go).
 	Planner *PlannerClientConfig `json:"planner,omitempty"`
+	// Always present: whether served positions are approximate and the
+	// radius they are within (location_privacy.go).
+	LocationPrivacy ClientLocationPrivacy `json:"locationPrivacy"`
 }
 
 // ClientUserManagement tells the frontend that accounts exist, and whether
