@@ -815,6 +815,8 @@ func leakRouteParams(f *lkFixture) map[string][]lkRequest {
 			"/api/nodes/"+rep+"/neighbors", "/api/nodes/"+rel+"/neighbors", "/api/nodes/"+comp+"/neighbors"),
 		"/api/nodes/{pubkey}/reach": want("Leak",
 			"/api/nodes/"+rep+"/reach?days=7", "/api/nodes/"+rel+"/reach?days=7"),
+		"/api/nodes/neighbor-rank": want(rep, "/api/nodes/neighbor-rank", "/api/nodes/neighbor-rank?role=repeater&focus="+rep,
+			"/api/nodes/neighbor-rank?q=leak&limit=2"),
 
 		// Companion GPS. z=18 asks for the finest grid the server has.
 		"/api/nodes/{pubkey}/rx-coverage": want(`"Feature"`,
