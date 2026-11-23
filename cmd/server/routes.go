@@ -195,6 +195,10 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 	if cfg != nil {
 		cfg.applyListLimitsDefaults()
 	}
+	// Node coordinates are fuzzed as they are read (node_coords.go). main
+	// installs this right after OpenDB, before the store loads; a server
+	// built without main (tests) gets it here.
+	db.setLocationFuzzer(cfg.LocationFuzzer())
 	return &Server{
 		db:        db,
 		cfg:       cfg,
@@ -1721,6 +1725,10 @@ func (s *Server) buildNodesResponse(r *http.Request) (NodeListResponse, error) {
 	// the API surface, so observer history (paths, hops, distances) remains
 	// intact for analytics.
 	if vis := s.nodeVisibility(); vis.filters() {
+		exact, err := s.geoFilterNodePositions(vis, nodes)
+		if err != nil {
+			return NodeListResponse{}, err
+		}
 		filtered := nodes[:0]
 		for _, node := range nodes {
 			pk, _ := node["public_key"].(string)
@@ -1728,6 +1736,16 @@ func (s *Server) buildNodesResponse(r *http.Request) (NodeListResponse, error) {
 			foreign, _ := node["foreign"].(bool)
 			lat, okLat := toFloat64(node["lat"])
 			lon, okLon := toFloat64(node["lon"])
+			if exact != nil {
+				// Location privacy: the row holds the approximate
+				// position; classify by the stored one. A node gone
+				// since the page query is dropped.
+				p, ok := exact[pk]
+				if !ok {
+					continue
+				}
+				lat, lon, okLat, okLon = p.lat, p.lon, p.ok, p.ok
+			}
 			if !okLat || !okLon {
 				lat, lon = 0, 0 // no fix: the geo_filter keeps it
 			}

@@ -198,6 +198,9 @@ func main() {
 		return err
 	}
 	defer dbClose()
+	// Location privacy: node positions are fuzzed as they are read, from
+	// the first query on (node_coords.go).
+	database.setLocationFuzzer(cfg.LocationFuzzer())
 
 	// Verify DB has expected tables
 	var tableName string

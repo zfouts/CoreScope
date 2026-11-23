@@ -7178,6 +7178,26 @@ type nodeInfo struct {
 	LastSeen         time.Time
 	FirstSeen        string // RFC3339; populated by buildNodeInfoMap for callers that need it (e.g. /api/nodes/{pk}/reach)
 	ObservationCount int    // count of advertisements/observations; used for tier-3 tiebreak in resolveWithContext
+
+	// exactLat/exactLon are the stored position when location privacy
+	// moved Lat/Lon (hasExact), for the geo_filter only: never serve them
+	// or compute with them. Read them through geoFilterPos.
+	exactLat, exactLon float64
+	hasExact           bool
+}
+
+// geoFilterPos is the position the geo_filter classifies the node by: the
+// stored one, even with location privacy on, so a node near the polygon
+// edge does not flip in and out with its approximate position. (0, 0) when
+// the node has no fix.
+func (n *nodeInfo) geoFilterPos() (lat, lon float64) {
+	if !n.HasGPS {
+		return 0, 0
+	}
+	if n.hasExact {
+		return n.exactLat, n.exactLon
+	}
+	return n.Lat, n.Lon
 }
 
 // schemaDegradationLogged is now a PacketStore field (see type definition) so
@@ -7188,78 +7208,6 @@ func (s *PacketStore) logSchemaDegradationOnce(msg string) {
 	if _, loaded := s.schemaDegradationLogged.LoadOrStore(msg, true); !loaded {
 		log.Printf("[store] schema-degradation: %s", msg)
 	}
-}
-
-func (s *PacketStore) getAllNodes() []nodeInfo {
-	// Schema probe: try richest → leanest. Logs a one-shot warning at each
-	// rung when we fall back to a thinner schema so operators see that a
-	// column is missing and the new tiebreak features are degraded. See
-	// #1197 (adversarial r1 #10). first_seen was added (#1627 r3) so callers
-	// like /api/nodes/{pk}/reach can avoid a per-request single-row SELECT;
-	// we fold it into the cached load (see getCachedNodesAndPM, 30s TTL) so
-	// the 4 buildNodeInfoMap call sites don't each pay for a fresh scan.
-	rows, err := s.db.conn.Query("SELECT public_key, name, role, lat, lon, last_seen, COALESCE(advert_count, 0), COALESCE(first_seen, '') FROM nodes")
-	hasLastSeen := true
-	hasAdvertCount := true
-	hasFirstSeen := true
-	if err != nil {
-		s.logSchemaDegradationOnce("nodes.first_seen missing — buildNodeInfoMap will not populate FirstSeen for /api/nodes/{pk}/reach and friends")
-		hasFirstSeen = false
-		rows, err = s.db.conn.Query("SELECT public_key, name, role, lat, lon, last_seen, COALESCE(advert_count, 0) FROM nodes")
-		if err != nil {
-			s.logSchemaDegradationOnce("nodes.advert_count missing — tier-3/4 ObservationCount tiebreak degraded; resolveWithContext will fall back to lex-pubkey order")
-			rows, err = s.db.conn.Query("SELECT public_key, name, role, lat, lon, last_seen FROM nodes")
-			hasAdvertCount = false
-			if err != nil {
-				s.logSchemaDegradationOnce("nodes.last_seen missing — node freshness signal unavailable")
-				rows, err = s.db.conn.Query("SELECT public_key, name, role, lat, lon FROM nodes")
-				hasLastSeen = false
-				if err != nil {
-					return nil
-				}
-			}
-		}
-	}
-	defer rows.Close()
-	var nodes []nodeInfo
-	for rows.Next() {
-		var pk string
-		var name, role sql.NullString
-		var lat, lon sql.NullFloat64
-		var lastSeen sql.NullString
-		var advertCount sql.NullInt64
-		var firstSeen sql.NullString
-		if hasFirstSeen {
-			rows.Scan(&pk, &name, &role, &lat, &lon, &lastSeen, &advertCount, &firstSeen)
-		} else if hasAdvertCount {
-			rows.Scan(&pk, &name, &role, &lat, &lon, &lastSeen, &advertCount)
-		} else if hasLastSeen {
-			rows.Scan(&pk, &name, &role, &lat, &lon, &lastSeen)
-		} else {
-			rows.Scan(&pk, &name, &role, &lat, &lon)
-		}
-		n := nodeInfo{PublicKey: pk, Name: nullStrVal(name), Role: nullStrVal(role)}
-		if hasFirstSeen && firstSeen.Valid {
-			n.FirstSeen = firstSeen.String
-		}
-		if lat.Valid && lon.Valid {
-			n.Lat = lat.Float64
-			n.Lon = lon.Float64
-			n.HasGPS = !(n.Lat == 0 && n.Lon == 0)
-		}
-		if hasLastSeen && lastSeen.Valid && lastSeen.String != "" {
-			if t, err := time.Parse(time.RFC3339, lastSeen.String); err == nil {
-				n.LastSeen = t
-			} else if t, err := time.Parse("2006-01-02 15:04:05", lastSeen.String); err == nil {
-				n.LastSeen = t
-			}
-		}
-		if hasAdvertCount && advertCount.Valid {
-			n.ObservationCount = int(advertCount.Int64)
-		}
-		nodes = append(nodes, n)
-	}
-	return nodes
 }
 
 type prefixMap struct {
@@ -9847,42 +9795,6 @@ func (s *PacketStore) computeMultiByteCapability(adopterHashSizes map[string]int
 type bulkHealthNode struct {
 	pk, name, role string
 	lat, lon       interface{}
-}
-
-// bulkHealthNodes reads the most recently seen nodes for GetBulkHealth,
-// keeping only areaNodes when set. With a region or area filter it reads up
-// to 10000 rows so the caller does not under-fill after its exclusions;
-// otherwise it stops at limit.
-func (s *PacketStore) bulkHealthNodes(limit int, regionFilter bool, areaNodes map[string]bool) ([]bulkHealthNode, error) {
-	filtered := regionFilter || areaNodes != nil
-	queryLimit := limit
-	if filtered {
-		queryLimit = 10000
-	}
-	rows, err := s.db.conn.Query("SELECT public_key, name, role, lat, lon FROM nodes ORDER BY last_seen DESC LIMIT ?", queryLimit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var nodes []bulkHealthNode
-	for rows.Next() {
-		var pk string
-		var name, role sql.NullString
-		var lat, lon sql.NullFloat64
-		rows.Scan(&pk, &name, &role, &lat, &lon)
-		if areaNodes != nil && !areaNodes[pk] {
-			continue
-		}
-		nodes = append(nodes, bulkHealthNode{
-			pk: pk, name: nullStrVal(name), role: nullStrVal(role),
-			lat: nullFloat(lat), lon: nullFloat(lon),
-		})
-		if !filtered && len(nodes) >= limit {
-			break
-		}
-	}
-	return nodes, nil
 }
 
 func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string]interface{} {
