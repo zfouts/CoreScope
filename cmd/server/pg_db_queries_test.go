@@ -397,9 +397,8 @@ func TestPgDBNodeQueries(t *testing.T) {
 			})
 		}
 	})
-	t.Run("GetNodeLocations", func(t *testing.T) {
-		same(t, d, "GetNodeLocations", false, func(db *DB) (map[string]map[string]any, error) { return db.GetNodeLocations(), nil })
-		same(t, d, "GetNodeLocationsByKeys", false, func(db *DB) (map[string]map[string]any, error) {
+	t.Run("GetNodeLocationsByKeys", func(t *testing.T) {
+		same(t, d, "GetNodeLocationsByKeys", false, func(db *DB) (map[string]nodeLocation, error) {
 			return db.GetNodeLocationsByKeys([]string{strings.ToUpper(pgqPkA), pgqPkB}), nil
 		})
 	})
