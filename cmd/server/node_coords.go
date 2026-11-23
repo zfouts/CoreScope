@@ -225,33 +225,16 @@ func (db *DB) nodeSelectCols() string {
 	return cols
 }
 
-// GetNodeLocations returns a map of lowercase public_key → {lat, lon, role} for node geo lookups.
-func (db *DB) GetNodeLocations() map[string]map[string]interface{} {
-	result := make(map[string]map[string]interface{})
-	rows, err := db.conn.Query("SELECT public_key, lat, lon, role FROM nodes")
-	if err != nil {
-		return result
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var pk string
-		var role sql.NullString
-		var lat, lon sql.NullFloat64
-		rows.Scan(&pk, &lat, &lon, &role)
-		lat, lon = db.servedNodePos(pk, lat, lon)
-		result[strings.ToLower(pk)] = map[string]interface{}{
-			"lat":  nullFloat(lat),
-			"lon":  nullFloat(lon),
-			"role": nullStr(role),
-		}
-	}
-	return result
+// nodeLocation is a node's served position and role, for observer rows. The
+// fields keep the JSON-null semantics of nullFloat/nullStr (nil when NULL).
+type nodeLocation struct {
+	Lat, Lon, Role interface{}
 }
 
 // GetNodeLocationsByKeys returns location data only for the given public keys.
 // This avoids fetching ALL nodes when only a few keys need to be matched.
-func (db *DB) GetNodeLocationsByKeys(keys []string) map[string]map[string]interface{} {
-	result := make(map[string]map[string]interface{})
+func (db *DB) GetNodeLocationsByKeys(keys []string) map[string]nodeLocation {
+	result := make(map[string]nodeLocation)
 	if len(keys) == 0 {
 		return result
 	}
@@ -276,11 +259,7 @@ func (db *DB) GetNodeLocationsByKeys(keys []string) map[string]map[string]interf
 		var lat, lon sql.NullFloat64
 		rows.Scan(&pk, &lat, &lon, &role)
 		lat, lon = db.servedNodePos(pk, lat, lon)
-		result[strings.ToLower(pk)] = map[string]interface{}{
-			"lat":  nullFloat(lat),
-			"lon":  nullFloat(lon),
-			"role": nullStr(role),
-		}
+		result[strings.ToLower(pk)] = nodeLocation{Lat: nullFloat(lat), Lon: nullFloat(lon), Role: nullStr(role)}
 	}
 	return result
 }

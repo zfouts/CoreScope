@@ -231,11 +231,8 @@ func TestNodeCoordReadersServeApproximatePositions(t *testing.T) {
 				t.Fatalf("GetNodeByPrefix: %v %v", m, err)
 			}
 			check("GetNodeByPrefix", m["public_key"].(string), m["lat"], m["lon"])
-			for pk, loc := range db.GetNodeLocations() {
-				check("GetNodeLocations", pk, loc["lat"], loc["lon"])
-			}
 			for pk, loc := range db.GetNodeLocationsByKeys([]string{nodes[0].pubkey, nodes[2].pubkey}) {
-				check("GetNodeLocationsByKeys", pk, loc["lat"], loc["lon"])
+				check("GetNodeLocationsByKeys", pk, loc.Lat, loc.Lon)
 			}
 			bh, err := srv.store.bulkHealthNodes(10, false, nil)
 			if err != nil || len(bh) != len(nodes) {

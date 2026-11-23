@@ -3140,9 +3140,7 @@ func (s *Server) buildObserversDefaultResponse() (ObserverListResponse, error) {
 		}
 		var lat, lon, nodeRole interface{}
 		if nodeLoc, ok := nodeLocations[strings.ToLower(o.ID)]; ok {
-			lat = nodeLoc["lat"]
-			lon = nodeLoc["lon"]
-			nodeRole = nodeLoc["role"]
+			lat, lon, nodeRole = nodeLoc.Lat, nodeLoc.Lon, nodeLoc.Role
 		}
 
 		resp := ObserverResp{
