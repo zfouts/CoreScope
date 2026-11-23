@@ -372,6 +372,7 @@ type TransmissionResp struct {
 	Direction        interface{}       `json:"direction"`
 	Score            interface{}       `json:"score,omitempty"`
 	Observations     []ObservationResp `json:"observations,omitempty"`
+	LocationHidden   bool              `json:"location_hidden,omitempty"` // located advert, served redacted
 }
 
 type ObservationResp struct {
@@ -388,6 +389,7 @@ type ObservationResp struct {
 	Direction      interface{} `json:"direction,omitempty"`
 	RawHex         interface{} `json:"raw_hex,omitempty"`
 	Timestamp      interface{} `json:"timestamp"`
+	LocationHidden bool        `json:"location_hidden,omitempty"` // located advert, served redacted
 }
 
 type GroupedPacketResp struct {

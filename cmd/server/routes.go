@@ -1405,6 +1405,17 @@ func (s *Server) handlePacketDetail(w http.ResponseWriter, r *http.Request) {
 	// raw_hex would skip every one of them and leave the bug in place on the
 	// main path. Only where no frame is stored does the canonical value stand.
 	canonicalHex, _ := packet["raw_hex"].(string)
+	// Location privacy: a located advert's observations are served like the
+	// packet (raw_hex null, marked); their stored frames are redacted by
+	// ObservationRawHexForHash as well.
+	if hidden, _ := packet["location_hidden"].(bool); hidden {
+		for _, obs := range observations {
+			obs["location_hidden"] = true
+			if _, ok := obs["raw_hex"]; ok {
+				obs["raw_hex"] = nil
+			}
+		}
+	}
 	if s.db != nil && hash != "" && len(observations) > 0 {
 		byObsID := s.db.ObservationRawHexForHash(hash)
 		for _, obs := range observations {
@@ -3465,8 +3476,15 @@ func (s *Server) handleAudioLabBuckets(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		// Use in-memory store (matches Node.js pktStore.packets approach)
 		s.store.mu.RLock()
-		byType := map[string][]*StoreTx{}
+		// The frame length is read here, under the lock: the rewrite feed
+		// may clear RawHex of an advert it finds located (packet_redact.go).
+		type audioPick struct {
+			tx    *StoreTx
+			bytes int
+		}
+		byType := map[string][]audioPick{}
 		for _, tx := range s.store.packets {
+			// A located advert has no frame to play (location privacy).
 			if tx.RawHex == "" {
 				continue
 			}
@@ -3483,18 +3501,17 @@ func (s *Server) handleAudioLabBuckets(w http.ResponseWriter, r *http.Request) {
 					typeName = name
 				}
 			}
-			byType[typeName] = append(byType[typeName], tx)
+			byType[typeName] = append(byType[typeName], audioPick{tx, len(tx.RawHex)})
 		}
 		s.store.mu.RUnlock()
 
-		// RawHex never changes once a tx is in the store, so the sort runs
-		// outside the lock.
+		// The sort runs outside the lock, on the lengths read under it.
 		for typeName, pkts := range byType {
 			sort.Slice(pkts, func(i, j int) bool {
-				return len(pkts[i].RawHex) < len(pkts[j].RawHex)
+				return pkts[i].bytes < pkts[j].bytes
 			})
 			count := min(8, len(pkts))
-			picks := make([]*StoreTx, count)
+			picks := make([]audioPick, count)
 			for i := range picks {
 				picks[i] = pkts[(i*len(pkts))/count]
 			}
@@ -3506,7 +3523,11 @@ func (s *Server) handleAudioLabBuckets(w http.ResponseWriter, r *http.Request) {
 		s.store.mu.RLock()
 		for typeName, picks := range byType {
 			picked := make([]AudioLabPacket, 0, len(picks))
-			for _, tx := range picks {
+			for _, pick := range picks {
+				tx := pick.tx
+				if tx.RawHex == "" {
+					continue // cleared by the rewrite feed since the scan
+				}
 				pt := 0
 				if tx.PayloadType != nil {
 					pt = *tx.PayloadType
@@ -3680,6 +3701,7 @@ func mapSliceToTransmissions(maps []map[string]interface{}) []TransmissionResp {
 		tx.PathJSON = m["path_json"]
 		tx.Direction = m["direction"]
 		tx.Score = m["score"]
+		tx.LocationHidden, _ = m["location_hidden"].(bool)
 		result = append(result, tx)
 	}
 	return result
@@ -3705,6 +3727,7 @@ func mapSliceToObservations(maps []map[string]interface{}) []ObservationResp {
 		obs.Direction = m["direction"]
 		obs.RawHex = m["raw_hex"]
 		obs.Timestamp = m["timestamp"]
+		obs.LocationHidden, _ = m["location_hidden"].(bool)
 		result = append(result, obs)
 	}
 	return result

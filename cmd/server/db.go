@@ -426,6 +426,7 @@ func (db *DB) scanTransmissionRow(rows *sql.Rows) map[string]interface{} {
 	if db.hasScopeName {
 		m["scope_name"] = nullStr(scopeName)
 	}
+	redactPacketMap(db.locationFuzzer(), m) // location privacy (packet_redact.go)
 	return m
 }
 
@@ -869,6 +870,7 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 	}
 	defer rows.Close()
 
+	locFuzz := db.locationFuzzer()
 	packets := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var hash, firstSeen, rawHex, decodedJSON, latest, observerID, observerName, observerIATA, pathJSON, distinctIatasCSV sql.NullString
@@ -887,7 +889,7 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 			continue
 		}
 
-		packets = append(packets, map[string]interface{}{
+		p := map[string]interface{}{
 			"hash":              nullStr(hash),
 			"first_seen":        nullStr(firstSeen),
 			"count":             count,
@@ -906,7 +908,9 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 			"snr":               nullFloat(snr),
 			"rssi":              nullFloat(rssi),
 			"scope_name":        nullStr(scopeName),
-		})
+		}
+		redactPacketMap(locFuzz, p) // location privacy (packet_redact.go)
+		packets = append(packets, p)
 	}
 
 	return &PacketResult{Packets: packets, Total: total}, nil
@@ -1145,6 +1149,7 @@ func (db *DB) ObservationRawHexForHash(hash string) map[int]string {
 		return nil
 	}
 	defer rows.Close()
+	locFuzz := db.locationFuzzer()
 	out := make(map[int]string)
 	for rows.Next() {
 		var id int
@@ -1152,8 +1157,9 @@ func (db *DB) ObservationRawHexForHash(hash string) map[int]string {
 		if err := rows.Scan(&id, &hx); err != nil {
 			continue
 		}
-		if hx.Valid && hx.String != "" {
-			out[id] = hx.String
+		// Location privacy: a located advert's frame is not served.
+		if v := redactObservationFrame(locFuzz, hx.String); v != "" {
+			out[id] = v
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -2494,13 +2500,14 @@ func (db *DB) GetNewTransmissionsSince(lastID int, limit int) ([]map[string]inte
 	}
 	defer rows.Close()
 
+	locFuzz := db.locationFuzzer()
 	var result []map[string]interface{}
 	for rows.Next() {
 		var id int
 		var rawHex, hash, firstSeen, decodedJSON sql.NullString
 		var routeType, payloadType, payloadVersion sql.NullInt64
 		rows.Scan(&id, &rawHex, &hash, &firstSeen, &routeType, &payloadType, &payloadVersion, &decodedJSON)
-		result = append(result, map[string]interface{}{
+		m := map[string]interface{}{
 			"id":              id,
 			"raw_hex":         nullStr(rawHex),
 			"hash":            nullStr(hash),
@@ -2509,7 +2516,9 @@ func (db *DB) GetNewTransmissionsSince(lastID int, limit int) ([]map[string]inte
 			"payload_type":    nullInt(payloadType),
 			"payload_version": nullInt(payloadVersion),
 			"decoded_json":    nullStr(decodedJSON),
-		})
+		}
+		redactPacketMap(locFuzz, m) // location privacy (packet_redact.go)
+		result = append(result, m)
 	}
 	return result, nil
 }
