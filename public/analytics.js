@@ -21,6 +21,9 @@
     if (abs < 86400) return (v / 3600).toFixed(1) + 'h';
     return (v / 86400).toFixed(1) + 'd';
   }
+  // Bumped by every loadSubpathDetail, tab render and destroy, so an answer that
+  // is no longer the newest request draws nothing (#2461).
+  var _subpathGen = 0;
   var _subpathMap = null; // subpath detail minimap; removed on re-render and page destroy (WebGL/Leaflet leak)
   // Every path that drops the subpath map comes through here: the tile-sync
   // record (nodes.js _applyTilesToNodeMap) goes first, then the Leaflet map.
@@ -391,6 +394,7 @@
   }
 
   async function renderTab(tab) {
+    _subpathGen++;
     const el = document.getElementById('analyticsContent');
     removeSubpathMap(); // every branch below replaces the content holding it
     const d = _analyticsData;
@@ -2368,14 +2372,17 @@
   }
 
   async function loadSubpathDetail(hopsStr) {
+    const gen = ++_subpathGen;
     const panel = document.getElementById('subpathDetail');
     removeSubpathMap(); // its container goes with the panel's content
     panel.classList.remove('collapsed');
     panel.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading…</div>';
     try {
       const data = await api('/analytics/subpath-detail?hops=' + encodeURIComponent(hopsStr), { ttl: CLIENT_TTL.analyticsRF });
+      if (gen !== _subpathGen) return;
       renderSubpathDetail(panel, data);
     } catch (e) {
+      if (gen !== _subpathGen) return;
       panel.innerHTML = `<div class="text-muted">Error: ${e.message}</div>`;
     }
   }
@@ -3209,7 +3216,7 @@
     }
   }
 
-function destroy() { removeSubpathMap(); _stopRolesRefresh(); _stopScopesRefresh(); _stopDistanceRetry(); _analyticsData = {}; _loadError = null; if (_regionChangeHandler) { RegionFilter.offChange(_regionChangeHandler); _regionChangeHandler = null; } if (_areaChangeHandler) { AreaFilter.offChange(_areaChangeHandler); _areaChangeHandler = null; } _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
+function destroy() { _subpathGen++; removeSubpathMap(); _stopRolesRefresh(); _stopScopesRefresh(); _stopDistanceRetry(); _analyticsData = {}; _loadError = null; if (_regionChangeHandler) { RegionFilter.offChange(_regionChangeHandler); _regionChangeHandler = null; } if (_areaChangeHandler) { AreaFilter.offChange(_areaChangeHandler); _areaChangeHandler = null; } _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
 
   // Expose for testing
   if (typeof window !== 'undefined') {
