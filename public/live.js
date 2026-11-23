@@ -1558,8 +1558,9 @@
     L.control.zoom({ position: 'topright' }).addTo(map);
 
     // Shared theme-synced basemap; the provider picker goes on the right,
-    // after the zoom control.
-    _liveAutoTiles = window.MC_attachAutoTiles(map, { controlPosition: 'topright' });
+    // after the zoom control. A link's duct=1 / duct_t shows the ducting
+    // overlay for this view only (#2459).
+    _liveAutoTiles = window.MC_attachAutoTiles(map, { controlPosition: 'topright', viewOverlays: window.MC_ductLinkOverlays ? window.MC_ductLinkOverlays() : [] });
 
     // Add custom Leaflet Control for Fullscreen
     const LiveFullscreenControl = L.Control.extend({

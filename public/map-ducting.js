@@ -24,6 +24,17 @@
  *       never stops the event, so the page's own map clicks (Planner sites,
  *       Live paths) work inside the forecast area. The cell popup opens only
  *       when the click did nothing else (see _watchClicks).
+ *       Deep link (#2459, on #/map, #/live, #/tools/planner): the hash's
+ *       duct_t=<unix seconds, a whole hour> is shown as a user pick when the
+ *       forecast has that hour (else the current hour); the user's picks,
+ *       Now and on/off are written back as duct=1 / duct_t with
+ *       history.replaceState, other parameters untouched (URLState.
+ *       parseDuctLink / ductLinkHash in url-state.js).
+ *   layer.mcUserToggle(on) -> called by the layers picker when the user (not
+ *       the overlay set) ticks or unticks the overlay
+ *   window.MC_ductLinkOverlays() -> ['ducting'] when the page's hash asks for
+ *       the overlay (duct=1 or a duct_t), else []: MC_attachAutoTiles'
+ *       viewOverlays, shown for this page view without saving the preference
  *   layer.openCellPopup(latlng) -> true when a cell with data at the shown
  *       hour is there and its popup opened
  *   window.MC_ductCellAt(grid, lat, lon) -> index into the cells of the cell
@@ -390,6 +401,7 @@
   var PANEL_KEY_STEP = 16;              // px per arrow key on the move handle (Shift: x4)
   var NARROW_Q = '(max-width: 600px)';  // phones: legend collapsed by default, no moving
   var TL_IDLE_MS = 120;                 // no scroll for this long = the scroll has ended
+  var LINK_WRITE_MS = 300;              // a pick unchanged for this long is written to the URL hash
   var TL_DRAG_PX = 4;                   // a mouse press moving less than this is a click
   var panelSeq = 0;                     // ids unique per panel (several maps on a page)
 
@@ -957,11 +969,14 @@
         this._timer = null;
         this._idx = -1;
         this._userPicked = false;
+        this._linkT = null;        // the link's forecast hour, until the forecast arrives
+        this._linkTimer = null;
       },
 
       onAdd: function (map) {
         this._map = map;
         var gen = ++this._gen;
+        this._linkT = linkState().t;
         this._cells = [];
         this._edge = this._lora = null;
         this._edgeColor = this._loraKey = '';
@@ -994,6 +1009,8 @@
         this._timerMs = 0;
         cancelLater(this._hourTimer);
         this._hourTimer = null;
+        cancelLater(this._linkTimer);
+        this._linkTimer = null;
         if (this._abort) { try { this._abort.abort(); } catch (_) {} this._abort = null; }
         var m = map || this._map;
         if (this._onTheme) { try { window.removeEventListener('theme-changed', this._onTheme); } catch (_) {} this._onTheme = null; }
@@ -1572,6 +1589,7 @@
         if (i >= 0 && i !== this._idx) {
           this._userPicked = true;
           this._setIndex(i, true);
+          this._linkLater();
         }
       },
 
@@ -1643,6 +1661,7 @@
         this._userPicked = true;
         if (i === this._idx) this._tlScrollTo(i, true);
         else this._setIndex(i, false, true);
+        this._linkLater();
       },
 
       _step: function (delta) {
@@ -1659,6 +1678,37 @@
         this._userPicked = false;
         if (i === this._idx) this._tlScrollTo(i, true);
         else this._setIndex(i, false, true);
+        this._linkLater();
+      },
+
+      // ── deep link (#2459) ──
+      // The hash's duct / duct_t follow what the user does, never the clock
+      // or a refresh. Picks are written once they have settled (one write
+      // however many keys, clicks or scroll frames led there).
+      _linkLater: function () {
+        if (!onLinkRoute()) return;
+        var self = this, gen = this._gen, from = pageRoute();
+        cancelLater(this._linkTimer);
+        this._linkTimer = later(function () {
+          self._linkTimer = null;
+          // Only on the page the pick was made on: after a navigation the
+          // hash is the next page's, even before this layer is removed.
+          if (gen === self._gen && pageRoute() === from) self._linkWrite(true);
+        }, LINK_WRITE_MS);
+      },
+
+      // on: the overlay is shown; the hour goes in only while the user picked it.
+      _linkWrite: function (on) {
+        writeLink(on, on && this._userPicked && this._shown != null ? this._shown : null);
+      },
+
+      // The user ticked or unticked the overlay in the layers picker (called
+      // by map-tile-providers.js; the overlay set's own adds and removes,
+      // and a page going away, do not come here).
+      mcUserToggle: function (on) {
+        cancelLater(this._linkTimer);
+        this._linkTimer = null;
+        this._linkWrite(!!on);
       },
 
       // The strip's ticks and labels; rebuilt only when the times change.
@@ -1997,6 +2047,15 @@
         var prevTime = this._shown != null ? this._shown : null;
         this._build();
         var idx = ductTimeIndex(d.times, Date.now() / 1000);
+        // The link's hour, read once: shown as the user's pick when the
+        // forecast has it, otherwise ignored.
+        if (this._linkT != null) {
+          if (d.times.indexOf(this._linkT) >= 0) {
+            prevTime = this._linkT;
+            this._userPicked = true;
+          }
+          this._linkT = null;
+        }
         if (this._userPicked) {
           var keep = prevTime != null ? d.times.indexOf(prevTime) : -1;
           if (keep >= 0) idx = keep;
@@ -2142,6 +2201,42 @@
       }
     });
   }
+
+  // ── deep link (#2459): duct / duct_t in the URL hash ──
+  // Parsing and serialising live in url-state.js (URLState.parseDuctLink /
+  // ductLinkHash); here only location is read and history written.
+  function pageHash() {
+    try { return (typeof location !== 'undefined' && location && location.hash) || ''; } catch (_) { return ''; }
+  }
+
+  function pageRoute() { return pageHash().split('?')[0]; }
+
+  function onLinkRoute() {
+    var U = window.URLState;
+    return !!(U && U.isDuctRoute && U.isDuctRoute(pageHash()));
+  }
+
+  // { on, t } of the page's hash; off when there is no link (or no URLState).
+  function linkState() {
+    var U = window.URLState;
+    try { if (U && U.parseDuctLink) return U.parseDuctLink(pageHash()); } catch (_) {}
+    return { on: false, t: null };
+  }
+
+  // replaceState, never location.hash =: app.js re-inits the page on
+  // hashchange, and a pick must not add a history entry.
+  function writeLink(on, t) {
+    try {
+      var U = window.URLState, cur = pageHash();
+      var next = U && U.ductLinkHash ? U.ductLinkHash(cur, on, t) : null;
+      if (next == null || next === cur) return;
+      history.replaceState(history.state, '', next);
+    } catch (_) { /* history unavailable */ }
+  }
+
+  // The overlay ids the page's link turns on for this page view, for
+  // MC_attachAutoTiles({ viewOverlays }): never saved as the preference.
+  window.MC_ductLinkOverlays = function () { return linkState().on ? ['ducting'] : []; };
 
   var LayerClass = null;
   window.MC_createDuctingLayer = function (opts) {
