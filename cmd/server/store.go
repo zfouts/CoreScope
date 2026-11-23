@@ -2298,9 +2298,9 @@ type groupedRow struct {
 	payloadType, routeType                 *int
 	snr, rssi                              *float64
 	scopeName                              *string
-	radio                                  string      // header observation's setting (#1869)
-	observations                           []*StoreObs // slice header only, see snapshotGroupedRow
-	locationHidden                         bool        // located advert, served redacted
+	radio                                  string       // header observation's setting (#1869)
+	observations                           []*StoreObs  // slice header only, see snapshotGroupedRow
+	hidden                                 *hiddenFrame // located advert, served redacted
 }
 
 // groupedPage builds the requested page of txs (sorted by LatestSeen DESC).
@@ -2348,7 +2348,7 @@ func snapshotGroupedRow(tx *StoreTx) groupedRow {
 		scopeName:        tx.ScopeName,
 		radio:            txRadio(tx),
 		observations:     tx.Observations,
-		locationHidden:   tx.locationHidden(),
+		hidden:           tx.hidden,
 	}
 }
 
@@ -2383,8 +2383,8 @@ func groupedRowsToPage(rows []groupedRow, total int) *PacketResult {
 			"scope_name":        strPtrOrNil(r.scopeName),
 			"radio":             strOrNil(r.radio),
 		}
-		if r.locationHidden {
-			m["location_hidden"] = true
+		if r.hidden != nil {
+			r.hidden.mark(m)
 		}
 		// resolved_path omitted for grouped view (cold path, not worth SQL round-trip)
 		packets[i] = m
@@ -5182,6 +5182,10 @@ const (
 func estimateStoreTxBytes(tx *StoreTx) int64 {
 	base := int64(storeTxBaseBytes)
 	base += int64(len(tx.RawHex) + len(tx.Hash) + len(tx.DecodedJSON) + len(tx.PathJSON))
+	if tx.hidden != nil {
+		// A located advert keeps its own copy of the frame head (packet_redact.go).
+		base += int64(hiddenFrameBaseBytes + len(tx.hidden.head))
+	}
 	base += int64(numIndexesPerTx * indexEntryBytes)
 	base += int64(decodedCacheFactor * len(tx.DecodedJSON))
 

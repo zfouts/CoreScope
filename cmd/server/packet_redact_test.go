@@ -18,7 +18,7 @@ func redactTestAdvert(t testing.TB, route byte, transport []byte, pathByte byte,
 	t.Helper()
 	payload := make([]byte, 0, 140)
 	for i := 0; i < 32; i++ {
-		payload = append(payload, byte(0xA0+i))
+		payload = append(payload, byte(0xA0+i)^name[0]) // one pubkey per name
 	}
 	payload = binary.LittleEndian.AppendUint32(payload, 1760000000)
 	for i := 0; i < 64; i++ {
@@ -95,10 +95,10 @@ func TestRedactLocatedAdvert(t *testing.T) {
 	if strings.Contains(outDec, "48.13") || strings.Contains(outDec, "11.57") {
 		t.Errorf("served decoded_json still names the position: %s", outDec)
 	}
-	// The kept head is the header and path byte only, and still answers the
-	// hash-size analytics exactly as the frame did.
-	if hidden.head != raw[:4] || hidden.bytes != len(raw)/2 {
-		t.Errorf("hidden frame = %+v, want head %q and %d bytes", *hidden, raw[:4], len(raw)/2)
+	// The kept head is the header, path byte and path bytes only, and still
+	// answers the hash-size analytics exactly as the frame did.
+	if hidden.head != raw[:8] || hidden.bytes != len(raw)/2 {
+		t.Errorf("hidden frame = %+v, want head %q and %d bytes", *hidden, raw[:8], len(raw)/2)
 	}
 	if packetpath.HashSize(hidden.head) != packetpath.HashSize(raw) {
 		t.Errorf("hash size from head %d, from frame %d", packetpath.HashSize(hidden.head), packetpath.HashSize(raw))
@@ -122,7 +122,12 @@ func TestRedactLocatedAdvertCases(t *testing.T) {
 	zero, zeroDec := redactTestAdvert(t, RouteFlood, nil, 0x00, nil, 0x92, 0, 0, "Z")
 	noLoc, noLocDec := redactTestAdvert(t, RouteFlood, nil, 0x00, nil, 0x82, 0, 0, "N")
 	tport, tportDec := redactTestAdvert(t, RouteTransportFlood, []byte{1, 2, 3, 4}, 0x81, []byte{0xAA, 0xBB, 0xCC}, 0x92, 48.1, 11.5, "T")
-	short := strings.ToUpper(hex.EncodeToString(append([]byte{PayloadADVERT<<2 | RouteFlood, 0}, make([]byte, 60)...)))
+	// Truncated frames (header + path byte 0x00 + n payload bytes).
+	trunc := func(n int) string {
+		return strings.ToUpper(hex.EncodeToString(append([]byte{PayloadADVERT<<2 | RouteFlood, 0}, make([]byte, n)...)))
+	}
+	// The 102-byte frame of the security review: signature, no flags byte.
+	cut102 := located[:2*102]
 
 	cases := []struct {
 		name     string
@@ -134,7 +139,7 @@ func TestRedactLocatedAdvertCases(t *testing.T) {
 		{"located", intp(PayloadADVERT), located, locatedDec, true, located[:4]},
 		{"located at 0,0", intp(PayloadADVERT), zero, zeroDec, true, zero[:4]},
 		{"no location keeps its bytes", intp(PayloadADVERT), noLoc, noLocDec, false, ""},
-		{"transport route head", intp(PayloadADVERT), tport, tportDec, true, tport[:12]},
+		{"transport route head", intp(PayloadADVERT), tport, tportDec, true, tport[:18]},
 		{"payload type from the header", nil, located, locatedDec, true, located[:4]},
 		{"frame only", intp(PayloadADVERT), located, "", true, located[:4]},
 		{"JSON only, lat key", intp(PayloadADVERT), "", `{"type":"ADVERT","lat":1,"lon":2,"signature":"00"}`, true, ""},
@@ -147,7 +152,12 @@ func TestRedactLocatedAdvertCases(t *testing.T) {
 		{"unreadable JSON", intp(PayloadADVERT), noLoc, `{"type":`, true, noLoc[:4]},
 		{"odd-length frame", intp(PayloadADVERT), noLoc + "0", noLocDec, true, noLoc[:4]},
 		{"bad hex at the flags", intp(PayloadADVERT), noLoc[:2*102] + "ZZ" + noLoc[2*103:], noLocDec, true, noLoc[:4]},
-		{"too short for appdata", intp(PayloadADVERT), short, `{"type":"ADVERT","error":"too short for advert"}`, false, ""},
+		{"truncated in the signature", intp(PayloadADVERT), trunc(60), `{"type":"ADVERT","error":"too short for advert","raw":"00"}`, true, "1100"},
+		{"truncated, first signature byte", intp(PayloadADVERT), trunc(37), "", true, "1100"},
+		{"truncated, 102-byte frame", intp(PayloadADVERT), cut102, "", true, located[:4]},
+		{"truncated, 102-byte frame, untyped", nil, cut102, "", true, located[:4]},
+		{"truncated before the signature", intp(PayloadADVERT), trunc(36), `{"type":"ADVERT","error":"too short for advert"}`, false, ""},
+		{"truncated in the path", intp(PayloadADVERT), "1102AB", "", false, ""},
 		{"not an advert", intp(PayloadGRP_TXT), located, locatedDec, false, ""},
 		{"untyped non-advert", nil, "1500AABB", `{"type":"GRP_TXT"}`, false, ""},
 		{"nothing stored", intp(PayloadADVERT), "", "", false, ""},
@@ -237,8 +247,8 @@ func TestRedactStoreLoadAndRewrite(t *testing.T) {
 			if tx.RawHex != "" || !tx.locationHidden() || strings.Contains(tx.DecodedJSON, `"lat"`) {
 				t.Fatalf("store holds the exact advert: raw=%q dec=%s", tx.RawHex, tx.DecodedJSON)
 			}
-			if tx.frameHead() != raw[:4] || tx.frameBytes() != len(raw)/2 {
-				t.Errorf("frame head %q / %d bytes, want %q / %d", tx.frameHead(), tx.frameBytes(), raw[:4], len(raw)/2)
+			if tx.frameHead() != raw[:8] || tx.frameBytes() != len(raw)/2 {
+				t.Errorf("frame head %q / %d bytes, want %q / %d", tx.frameHead(), tx.frameBytes(), raw[:8], len(raw)/2)
 			}
 			if d := tx.ParsedDecoded(); d["pubKey"] == nil || d["signatureValid"] != true {
 				t.Errorf("redaction lost pubKey or signatureValid: %v", d)

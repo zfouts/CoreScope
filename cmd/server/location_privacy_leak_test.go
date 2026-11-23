@@ -144,7 +144,7 @@ func newLKChecker(points []lkPoint, fuzz func(lkPoint) geoPoint, adverts []lkAdv
 }
 
 func (f *lkFixture) checker() *lkChecker {
-	return newLKChecker(f.points, f.fuzzed, f.adverts, lkRadiusM)
+	return newLKChecker(f.points, f.fuzzed, append(append([]lkAdvert{}, f.adverts...), f.truncated...), lkRadiusM)
 }
 
 func lkIsDigit(b byte) bool { return b >= '0' && b <= '9' }

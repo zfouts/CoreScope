@@ -28,13 +28,20 @@ import (
 // served without. They are deleted here, never read; that is why
 // TestDecodedCacheDroppedKeysAreUnread exempts this declaration like the
 // decodedCacheDroppedKeys one.
+//
+// "raw" is the payload hex the decoder keeps when an advert is too short to
+// decode: in a truncated advert it holds the signature bytes the frame has.
 var locatedAdvertHiddenKeys = []string{
-	"lat", "lon", "signature",
+	"lat", "lon", "signature", "raw",
 }
 
 // advertLocationFlag is ADV_LATLON_MASK (firmware AdvertDataHelpers.h): the
 // appdata flags bit saying latitude and longitude follow.
 const advertLocationFlag = 0x10
+
+// advertSignatureOffset is where the signature starts in an ADVERT payload:
+// pubkey(32) + timestamp(4) (firmware docs/payloads.md).
+const advertSignatureOffset = 36
 
 // advertAppdataOffset is where appdata starts in an ADVERT payload:
 // pubkey(32) + timestamp(4) + signature(64) (firmware docs/payloads.md).
@@ -42,13 +49,18 @@ const advertAppdataOffset = 100
 
 // hiddenFrame is what the store keeps of a located advert's wire frame.
 type hiddenFrame struct {
-	// head is the frame's header, transport codes (transport routes) and
-	// path byte, in hex: what packetpath.PathByte / HashSize read. It never
-	// includes a path hop or a payload byte.
+	// head is the frame's header, transport codes (transport routes), path
+	// length byte and path bytes, in hex: what packetpath.PathByte /
+	// HashSize read, served as frame_head. It never includes a payload byte,
+	// and it is its own copy, not a substring of the frame.
 	head string
 	// bytes is the frame length in bytes (packet-size and airtime stats).
 	bytes int
 }
+
+// hiddenFrameBaseBytes is the allocation of a hiddenFrame (string header +
+// int) plus the head's own string header, for estimateStoreTxBytes.
+const hiddenFrameBaseBytes = 24 + 16
 
 // locationHidden reports whether tx is a located advert served redacted.
 func (tx *StoreTx) locationHidden() bool { return tx.hidden != nil }
@@ -250,10 +262,23 @@ func untypedIsAdvert(rawHex, decodedJSON string) bool {
 }
 
 // advertFrameLocation walks an ADVERT frame to its appdata flags byte and
-// reports whether the location bit is set, plus the frame head kept for the
-// analytics. A frame too short to have appdata has no location; a frame that
-// cannot be walked (bad hex, reserved path size, odd length) reports true.
-// An empty frame reports false: there are no bytes to hide.
+// reports whether the frame must be hidden, plus the frame head kept for the
+// analytics and served as frame_head. It fails closed:
+//
+//   - a frame that cannot be walked (bad hex, odd length, reserved path
+//     size) is hidden;
+//   - a frame that holds at least one signature byte (payload longer than
+//     pubkey + timestamp, 36 bytes) but no readable flags byte is hidden: a
+//     truncated signature still narrows a brute force of the position, and
+//     a frame cut short cannot say it has none;
+//   - otherwise the location bit of the flags byte decides.
+//
+// A frame that ends before the signature has no location and nothing to
+// verify one with, so it keeps its bytes. An empty frame reports false.
+//
+// head is a copy (strings.Clone), never a substring of rawHex: a substring
+// would keep the whole exact frame, position and signature included,
+// reachable from the store.
 func advertFrameLocation(rawHex string) (loc bool, head string) {
 	if rawHex == "" {
 		return false, ""
@@ -268,25 +293,31 @@ func advertFrameLocation(rawHex string) (loc bool, head string) {
 	}
 	pathByte, ok := hexByte(rawHex, off)
 	if !ok {
-		// Shorter than the path byte: header and transport codes only.
+		// Shorter than the path byte: header and transport codes only, no
+		// payload byte to hide.
 		if len(rawHex)%2 != 0 {
 			return true, ""
 		}
-		return false, rawHex
+		return false, strings.Clone(rawHex)
 	}
-	head = rawHex[:2*(off+1)]
 	if len(rawHex)%2 != 0 || !isValidPathLen(pathByte) {
-		return true, head
+		return true, strings.Clone(rawHex[:2*(off+1)])
 	}
-	flagsAt := off + 1 + int(pathByte>>6+1)*int(pathByte&0x3F) + advertAppdataOffset
-	if flagsAt >= len(rawHex)/2 {
-		return false, head
-	}
+	n := len(rawHex) / 2
+	payloadAt := off + 1 + int(pathByte>>6+1)*int(pathByte&0x3F)
+	head = strings.Clone(rawHex[:2*min(payloadAt, n)])
+	flagsAt := payloadAt + advertAppdataOffset
 	flags, ok := hexByte(rawHex, flagsAt)
-	if !ok {
-		return true, head
+	switch {
+	case ok:
+		return flags&advertLocationFlag != 0, head
+	case flagsAt < n:
+		return true, head // the flags byte is there but is not hex
+	default:
+		// Truncated before the flags byte: hidden once any signature byte
+		// (payload offset 36 on) is in the frame.
+		return n > payloadAt+advertSignatureOffset, head
 	}
-	return flags&advertLocationFlag != 0, head
 }
 
 // jsonFlagTrue reports whether the JSON object text s has key set to true.
@@ -342,8 +373,17 @@ func redactStoreTx(f *locationFuzzer, tx *StoreTx) {
 // the feature off leaves every response as it was.
 func markLocationHidden(m map[string]interface{}, tx *StoreTx) {
 	if tx != nil && tx.hidden != nil {
-		m["location_hidden"] = true
+		tx.hidden.mark(m)
 	}
+}
+
+// mark sets the hidden-packet fields of the contract on a served map:
+// location_hidden, and the frame's size and header (frame_bytes,
+// frame_head) so size filters and hash-size badges keep working.
+func (h *hiddenFrame) mark(m map[string]interface{}) {
+	m["location_hidden"] = true
+	m["frame_bytes"] = h.bytes
+	m["frame_head"] = strOrNil(h.head)
 }
 
 // redactPacketMap redacts a packet or observation map read straight from SQL
@@ -370,7 +410,7 @@ func redactPacketMap(f *locationFuzzer, m map[string]interface{}) bool {
 	if _, ok := m["decoded_json"]; ok {
 		m["decoded_json"] = strOrNil(dec)
 	}
-	m["location_hidden"] = true
+	hidden.mark(m)
 	return true
 }
 

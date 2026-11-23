@@ -373,6 +373,8 @@ type TransmissionResp struct {
 	Score            interface{}       `json:"score,omitempty"`
 	Observations     []ObservationResp `json:"observations,omitempty"`
 	LocationHidden   bool              `json:"location_hidden,omitempty"` // located advert, served redacted
+	FrameBytes       int               `json:"frame_bytes,omitempty"`     // hidden packet: frame length
+	FrameHead        string            `json:"frame_head,omitempty"`      // hidden packet: header and path bytes, hex
 }
 
 type ObservationResp struct {
@@ -390,6 +392,8 @@ type ObservationResp struct {
 	RawHex         interface{} `json:"raw_hex,omitempty"`
 	Timestamp      interface{} `json:"timestamp"`
 	LocationHidden bool        `json:"location_hidden,omitempty"` // located advert, served redacted
+	FrameBytes     int         `json:"frame_bytes,omitempty"`     // hidden packet: frame length
+	FrameHead      string      `json:"frame_head,omitempty"`      // hidden packet: header and path bytes, hex
 }
 
 type GroupedPacketResp struct {

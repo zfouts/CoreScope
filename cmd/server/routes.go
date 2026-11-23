@@ -1406,17 +1406,17 @@ func (s *Server) handlePacketDetail(w http.ResponseWriter, r *http.Request) {
 	// main path. Only where no frame is stored does the canonical value stand.
 	canonicalHex, _ := packet["raw_hex"].(string)
 	// Location privacy: a located advert's observations are served like the
-	// packet (raw_hex null, marked); their stored frames are redacted by
-	// ObservationRawHexForHash as well.
+	// packet (raw_hex null, marked, frame size and head), and no observation
+	// or canonical frame is filled in for it: each observation frame carries
+	// the same position and signature.
 	if hidden, _ := packet["location_hidden"].(bool); hidden {
 		for _, obs := range observations {
+			obs["raw_hex"] = nil
 			obs["location_hidden"] = true
-			if _, ok := obs["raw_hex"]; ok {
-				obs["raw_hex"] = nil
-			}
+			obs["frame_bytes"] = packet["frame_bytes"]
+			obs["frame_head"] = packet["frame_head"]
 		}
-	}
-	if s.db != nil && hash != "" && len(observations) > 0 {
+	} else if s.db != nil && hash != "" && len(observations) > 0 {
 		byObsID := s.db.ObservationRawHexForHash(hash)
 		for _, obs := range observations {
 			if id, ok := obs["id"].(int); ok {
@@ -3700,6 +3700,8 @@ func mapSliceToTransmissions(maps []map[string]interface{}) []TransmissionResp {
 		tx.Direction = m["direction"]
 		tx.Score = m["score"]
 		tx.LocationHidden, _ = m["location_hidden"].(bool)
+		tx.FrameBytes, _ = m["frame_bytes"].(int)
+		tx.FrameHead, _ = m["frame_head"].(string)
 		result = append(result, tx)
 	}
 	return result
@@ -3726,6 +3728,8 @@ func mapSliceToObservations(maps []map[string]interface{}) []ObservationResp {
 		obs.RawHex = m["raw_hex"]
 		obs.Timestamp = m["timestamp"]
 		obs.LocationHidden, _ = m["location_hidden"].(bool)
+		obs.FrameBytes, _ = m["frame_bytes"].(int)
+		obs.FrameHead, _ = m["frame_head"].(string)
 		result = append(result, obs)
 	}
 	return result

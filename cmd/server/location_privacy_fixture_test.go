@@ -58,7 +58,11 @@ type lkFixture struct {
 	*authFixture
 	store *PacketStore
 	fuzz  *locationFuzzer
-	user  *client // logged in; linked the companion, claimed the repeater
+	// truncated are located adverts whose frame ends inside the signature:
+	// no appdata, so no position bytes, but signature bytes that narrow a
+	// brute force of the position. They must be served like located ones.
+	truncated []lkAdvert
+	user      *client // logged in; linked the companion, claimed the repeater
 
 	points  []lkPoint
 	adverts []lkAdvert
@@ -587,6 +591,21 @@ func (f *lkFixture) seed(t *testing.T, db *DB) {
 		{observerIdx: obsRelay, hops: [][]byte{hRep}, resolved: []string{rep.pubkey}, snr: 4.25, rssi: -101},
 		{observerIdx: obsRelay, snr: 10.5, rssi: -84},
 	})
+	// A located advert of the repeater cut short after 40 signature bytes:
+	// the frame has no appdata flags byte to say whether it is located.
+	f.nextTS += 60
+	full := lkAdvertPayload(lkRepeaterKey, 2, rep.lat, rep.lon, "LeakRepeater", f.nextTS)
+	cut := full[:36+40]
+	_, cutHash, cutFrames := f.insertPacket(t, db, byte(4<<2|1), cut, nil, nil, now.Add(-15*time.Minute), []lkObs{
+		{observerIdx: obsDedicated, hops: [][]byte{hRel}, resolved: []string{rel.pubkey}, snr: 7.25, rssi: -91},
+		{observerIdx: obsRelay, snr: 9.75, rssi: -83},
+	})
+	cutLoc := strings.ToUpper(hex.EncodeToString(full[101:109]))
+	f.truncated = append(f.truncated, lkAdvert{
+		pubkey: rep.pubkey, hash: cutHash, rawHex: cutFrames,
+		sigHex: strings.ToUpper(hex.EncodeToString(cut[36:])),
+		latHex: cutLoc[:8], lonHex: cutLoc[8:], latLonHex: cutLoc,
+	})
 	// A channel message relayed over both repeaters: paths, subpaths, channels.
 	msg := append([]byte{0xd9, 0x4a, 0x7c}, []byte("leak-fixture-ciphertext-16b!")...)
 	_, f.msgHash, _ = f.insertPacket(t, db, byte(5<<2|1), msg, map[string]any{
@@ -697,6 +716,25 @@ func TestLocationPrivacyFixture(t *testing.T) {
 			t.Errorf("stored decoded_json of %s lacks the exact location or signature: %s", a.hash, dj)
 		}
 	}
+	// The truncated advert: a prefix of a real signed advert that holds
+	// signature bytes and no flags byte, stored as the decoder leaves it.
+	if len(f.truncated) != 1 {
+		t.Fatalf("truncated adverts = %d, want 1", len(f.truncated))
+	}
+	for _, a := range f.truncated {
+		for _, raw := range a.rawHex {
+			pkt, err := DecodePacket(raw, true)
+			if err != nil {
+				t.Fatalf("truncated advert %s: %v", a.hash, err)
+			}
+			if pkt.Payload.Type != "ADVERT" || pkt.Payload.Error == "" || pkt.Payload.Flags != nil {
+				t.Errorf("truncated advert %s decodes as %+v", a.hash, pkt.Payload)
+			}
+			if len(a.sigHex) < 32 || !strings.Contains(raw, a.sigHex) {
+				t.Errorf("truncated advert %s: recorded signature bytes are not the frame's", a.hash)
+			}
+		}
+	}
 	// Needles are unique per measured point, so a hit names its point.
 	seen := map[string]string{}
 	for _, p := range f.points {
@@ -726,15 +764,15 @@ func TestLocationPrivacyFixture(t *testing.T) {
 	for _, c := range []struct {
 		table string
 		want  int
-	}{{"nodes", 4}, {"inactive_nodes", 1}, {"observers", 2}, {"transmissions", 5}, {"observations", 10},
+	}{{"nodes", 4}, {"inactive_nodes", 1}, {"observers", 2}, {"transmissions", 6}, {"observations", 12},
 		{"neighbor_edges", 4}, {"client_receptions", 11}, {"client_rf_samples", 9}} {
 		var n int
 		if err := f.srv.db.conn.QueryRow(`SELECT COUNT(*) FROM ` + c.table).Scan(&n); err != nil || n != c.want {
 			t.Errorf("%s rows = %d (%v), want %d", c.table, n, err, c.want)
 		}
 	}
-	if got := len(f.store.packets); got != 5 {
-		t.Errorf("store holds %d packets, want 5", got)
+	if got := len(f.store.packets); got != 6 {
+		t.Errorf("store holds %d packets, want 6", got)
 	}
 	if !f.fuzzIsIdentity() {
 		for _, p := range f.points {
