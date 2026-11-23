@@ -22,28 +22,25 @@ package main
 //
 //	LOCPRIV_LEAK_REPORT=1 go test -run LocationLeak ./...
 //
-// which prints the current set in this format. Generated against the identity
-// stub of Fuzz; the same set holds with the real one (the checks treat an
-// exact value as a leak either way).
+// which prints the current set in this format.
 //
 // Fixture gaps: none. Every route answers 200 from the seeded data except
 // GET /api/notifications/unsubscribe (303, a redirect by design).
 var knownLocationLeaks = map[string]string{
-	"/api/analytics/distance dist":          "B3 coordinates",
 	"/api/audio-lab/buckets coords":         "B5 packets",
 	"/api/audio-lab/buckets packet":         "B5 packets",
 	"/api/audio-lab/buckets rawhex":         "B5 packets",
 	"/api/audio-lab/buckets text":           "B5 packets",
 	"/api/nodes/reported coords":            "B4 companion GPS",
 	"/api/nodes/reported text":              "B4 companion GPS",
-	"/api/nodes/{pubkey} coords":            "B3 coordinates, B5 packets",
+	"/api/nodes/{pubkey} coords":            "B5 packets",
 	"/api/nodes/{pubkey} packet":            "B5 packets",
 	"/api/nodes/{pubkey} rawhex":            "B5 packets",
-	"/api/nodes/{pubkey} text":              "B3 coordinates, B5 packets",
-	"/api/nodes/{pubkey}/health coords":     "B3 coordinates, B5 packets",
+	"/api/nodes/{pubkey} text":              "B5 packets",
+	"/api/nodes/{pubkey}/health coords":     "B5 packets",
 	"/api/nodes/{pubkey}/health packet":     "B5 packets",
 	"/api/nodes/{pubkey}/health rawhex":     "B5 packets",
-	"/api/nodes/{pubkey}/health text":       "B3 coordinates, B5 packets",
+	"/api/nodes/{pubkey}/health text":       "B5 packets",
 	"/api/nodes/{pubkey}/rx-coverage cell":  "B4 companion GPS",
 	"/api/nodes/{pubkey}/rx-coverage text":  "B4 companion GPS",
 	"/api/observers/{id}/analytics coords":  "B5 packets",

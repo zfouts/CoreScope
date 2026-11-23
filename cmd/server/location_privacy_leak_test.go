@@ -16,6 +16,7 @@ package main
 // What a body is checked for (lkChecker)
 //
 //	text    an exact coordinate as text: 3 to 6 decimals, or the integer × 1e6.
+//	        (The vertices of cell polygons: 5 and 6 decimals and × 1e6 only.)
 //	rawhex  an advert's frame, its location bytes or its signature, in hex.
 //	coords  a coordinate pair (lat/lon keys, or a [a, b] number array in either
 //	        order) within 2 × radius of an exact position that is not a fuzzed
@@ -66,6 +67,10 @@ type lkNeedle struct {
 	text  string
 	what  string
 	micro bool // an integer: must not be part of a longer number
+	// coarse: 3 or 4 decimals, a band 100 m or 10 m wide. A vertex of a
+	// coverage cell can fall in it by chance, so cell polygons are exempt
+	// (lkWithoutCells).
+	coarse bool
 }
 
 type lkDistance struct {
@@ -100,7 +105,8 @@ func newLKChecker(points []lkPoint, fuzz func(lkPoint) geoPoint, adverts []lkAdv
 			for _, n := range dec {
 				if !seen[n] {
 					seen[n] = true
-					c.coords = append(c.coords, lkNeedle{text: n, what: p.name + " " + axis})
+					decimals := len(n) - strings.IndexByte(n, '.') - 1
+					c.coords = append(c.coords, lkNeedle{text: n, what: p.name + " " + axis, coarse: decimals < 5})
 				}
 			}
 			if !seen[micro] {
@@ -182,8 +188,13 @@ func (c *lkChecker) check(body []byte, probes []geoPoint) []lkLeak {
 func (c *lkChecker) checkAs(body []byte, probes []geoPoint, allDist bool) []lkLeak {
 	var leaks []lkLeak
 	s := string(body)
+	coarse := lkWithoutCells(body)
 	for _, n := range c.coords {
-		if lkHasNumber(s, n) {
+		in := s
+		if n.coarse {
+			in = coarse
+		}
+		if lkHasNumber(in, n) {
 			leaks = append(leaks, lkLeak{"text", fmt.Sprintf("exact %s as %q", n.what, n.text)})
 		}
 	}
@@ -208,6 +219,53 @@ func (c *lkChecker) checkAs(body []byte, probes []geoPoint, allDist bool) []lkLe
 		leaks = append(leaks, w.leaks...)
 	}
 	return leaks
+}
+
+// lkWithoutCells is body for the coarse text needles: the same JSON with the
+// vertices of every GeoJSON polygon feature taken out. Everything else
+// (properties, points, any other number or string) stays. A cell that is
+// correct (the cell rule: not small and close enough to place a position)
+// has vertices within a few km of the positions it aggregates, and one of
+// them sharing three or four decimals with a position is chance, not a leak:
+// 1 in 10 per axis at 3 decimals for a 1 km cell. The fine needles (5 and 6
+// decimals, × 1e6) are matched on the untouched body, vertices included. A
+// body that is not JSON, or holds no such polygon, is returned as it is.
+func lkWithoutCells(body []byte) string {
+	var v any
+	if json.Unmarshal(body, &v) != nil {
+		return string(body)
+	}
+	found := false
+	var strip func(v any)
+	strip = func(v any) {
+		switch x := v.(type) {
+		case []any:
+			for _, e := range x {
+				strip(e)
+			}
+		case map[string]any:
+			if geom, ok := x["geometry"].(map[string]any); ok && x["type"] == "Feature" {
+				if gt, _ := geom["type"].(string); gt == "Polygon" || gt == "MultiPolygon" {
+					if _, has := geom["coordinates"]; has {
+						geom["coordinates"] = nil
+						found = true
+					}
+				}
+			}
+			for _, e := range x {
+				strip(e)
+			}
+		}
+	}
+	strip(v)
+	if !found {
+		return string(body)
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return string(body)
+	}
+	return string(out)
 }
 
 type lkWalk struct {
@@ -329,6 +387,7 @@ func (w *lkWalk) walk(v any, path string) {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
+		bin := lkIsHistogramBin(x, path)
 		for _, k := range keys {
 			val := x[k]
 			if num, ok := val.(float64); ok {
@@ -338,7 +397,9 @@ func (w *lkWalk) walk(v any, path string) {
 				case "lon":
 					lons[base] = num
 				}
-				if strings.Contains(strings.ToLower(k), "dist") || (w.allDist && num != math.Trunc(num)) {
+				if bin && (k == "x" || k == "w") {
+					// where a bin starts and how wide it is, not a distance
+				} else if strings.Contains(strings.ToLower(k), "dist") || (w.allDist && num != math.Trunc(num)) {
 					w.distance(num, path+"."+k)
 				}
 			}
@@ -350,6 +411,28 @@ func (w *lkWalk) walk(v any, path string) {
 			}
 		}
 	}
+}
+
+// lkIsHistogramBin reports whether m is one bin of a histogram (types.go
+// HistogramBin): an element of a "bins" array with nothing but x, w and
+// count. Its x and w are the bin's left edge and width on a grid the server
+// lays between the smallest and largest value; an edge can equal an exact
+// distance by chance (13.5 on a 0.5 km grid), and says nothing a count of
+// values between two edges does not. The histogram's own min and max, and
+// every distance elsewhere in the body, are still checked.
+func lkIsHistogramBin(m map[string]any, path string) bool {
+	i := strings.LastIndex(path, ".bins[")
+	if i < 0 || !strings.HasSuffix(path, "]") || strings.ContainsAny(path[i+len(".bins["):len(path)-1], ".[]") {
+		return false
+	}
+	for k := range m {
+		if k != "x" && k != "w" && k != "count" {
+			return false
+		}
+	}
+	_, hasX := m["x"]
+	_, hasW := m["w"]
+	return hasX && hasW
 }
 
 // pair applies the coords rule to one served coordinate.
@@ -1158,11 +1241,127 @@ func (c *lkChecker) lkBoxPlaces(box geoBBox, p geoPoint) (farM float64, leak boo
 	return farM, farM < c.radiusM/2
 }
 
+// The bbox oracle on companion GPS (R16).
+//
+// A client shrinks the bbox of /api/rx-coverage, one edge at a time, until
+// the companion's coverage disappears: the box it converges on (lkTightBox)
+// is everything the bbox filter tells it. On an unprotected server that box
+// is the fix itself. On a server that bins fixes into privacy cells it is the
+// cell (its centre, or its extent), which is all a client may learn. A fix
+// that happens to lie next to its cell centre is then still "found" within
+// metres, and rightly so: judging one box by its distance to the fix would
+// make the verdict depend on where the fixture point falls in the grid.
+//
+// What must hold instead is that the box does not depend on where the fix is
+// inside its cell. The test cannot ask the server for its grid, so it moves
+// the fix and compares, along two lines from the fixture's track point
+// (lkFixLines), searching the tightest box at each position:
+//
+//   - near: 5 positions 40 m apart (160 m end to end). Cells are at least
+//     the radius wide, so the line crosses at most one cell edge per axis and
+//     the 5 positions lie in at most 3 cells: at most 3 different boxes. An
+//     unprotected server, or one with cells under 40 m, gives 5.
+//   - wide: 5 positions 600 m apart (2.4 km end to end). If every box places
+//     its fix within radius / 2, the server follows the fix more closely than
+//     the setting allows, whatever it bins to: that catches cells too small
+//     for the first line to tell apart from proper ones. With cells of at
+//     least 2 × radius converging on their centre it cannot happen: the
+//     points within radius / 2 of one centre span under 1000 m of the line,
+//     so at most two neighbouring positions, and two such stretches are over
+//     1000 m apart (the centres are 2 × radius apart or more), so no two
+//     neighbouring positions (600 m) are near different centres. Of 5
+//     positions at least one is therefore farther than radius / 2 from every
+//     centre. (With cells between radius and 2 × radius this bound is not
+//     guaranteed; the feature's cells are 2 × radius.)
+//
+// Both verdicts are properties of the grid, not of the fixture point.
+type lkOracleRun struct {
+	fix   geoPoint
+	box   geoBBox
+	found bool
+}
+
+const (
+	lkNearStepM, lkWideStepM = 40.0, 600.0
+	lkFixSteps               = 5
+)
+
+// lkFixLines returns the two lines of positions, both starting at from and
+// running south-east (away from the fixture's other receptions).
+func lkFixLines(from geoPoint) (near, wide []geoPoint) {
+	line := func(stepM float64) []geoPoint {
+		d := stepM / math.Sqrt2
+		dLat := d / 111_320
+		dLon := d / (111_320 * math.Cos(from.Lat*math.Pi/180))
+		var out []geoPoint
+		for i := 0; i < lkFixSteps; i++ {
+			out = append(out, geoPoint{Lat: from.Lat - float64(i)*dLat, Lon: from.Lon + float64(i)*dLon})
+		}
+		return out
+	}
+	return line(lkNearStepM), line(lkWideStepM)
+}
+
+// lkFixStartBox is the box every search starts from: it holds every position
+// of both lines with over 2 km to spare (the cell a fix is binned to can be
+// that far), and none of the fixture's other receptions or their cells (the
+// nearest, the companion's home, is 4.6 km north and 4.6 km west of from).
+func lkFixStartBox(from geoPoint) geoBBox {
+	return geoBBox{S: from.Lat - 0.04, W: from.Lon - 0.03, N: from.Lat + 0.02, E: from.Lon + 0.045}
+}
+
+// lkSameBox: equal to well under the bisection's resolution on the ground.
+func lkSameBox(a, b geoBBox) bool {
+	const eps = 1e-7
+	return math.Abs(a.S-b.S) < eps && math.Abs(a.N-b.N) < eps && math.Abs(a.W-b.W) < eps && math.Abs(a.E-b.E) < eps
+}
+
+// lkOracleVerdict judges the two lines; "" is no leak. A position whose
+// coverage is not found at all gives nothing away and counts as one more
+// "box" that is the same for every such position.
+func lkOracleVerdict(near, wide []lkOracleRun, radiusM float64) string {
+	var distinct []lkOracleRun
+	for _, r := range near {
+		same := false
+		for _, d := range distinct {
+			if r.found == d.found && (!r.found || lkSameBox(r.box, d.box)) {
+				same = true
+				break
+			}
+		}
+		if !same {
+			distinct = append(distinct, r)
+		}
+	}
+	if len(distinct) > 3 {
+		return fmt.Sprintf("the bbox filter tells apart %d of %d fixes %.0f m apart: it follows the fix, not a cell at least the radius wide",
+			len(distinct), len(near), lkNearStepM)
+	}
+	worst, all := 0.0, len(wide) > 0
+	for _, r := range wide {
+		if !r.found {
+			all = false
+			break
+		}
+		far := lkFarCornerM(r.box, r.fix)
+		worst = math.Max(worst, far)
+		if far >= radiusM/2 {
+			all = false
+			break
+		}
+	}
+	if all {
+		return fmt.Sprintf("the bbox filter places each of %d fixes %.0f m apart within %.1f m (limit: radius/2 = %.0f m)",
+			len(wide), lkWideStepM, worst, radiusM/2)
+	}
+	return ""
+}
+
 // TestLocationLeakOracles: what the answers give away without holding a
 // coordinate.
 //
 //	rx-coverage-bbox    shrinking the bbox of /api/rx-coverage until the
-//	                    companion's cell disappears (R16).
+//	                    companion's coverage disappears (R16; see lkOracleRun).
 //	planner-nodes-bbox  the same on the planner's node listing: the repeaters
 //	                    /api/planner/coverage reports for its box.
 //	elevation-known     /api/elevation/profile accepts only known node
@@ -1180,11 +1379,11 @@ func TestLocationLeakOracles(t *testing.T) {
 		return geoBBox{S: p.Lat - d, W: p.Lon - d, N: p.Lat + d, E: p.Lon + d}
 	}
 
-	// Only the track point's receptions are within the start box (the next
-	// reception is 5 km away), so any feature is the track point's.
+	// The companion's fix on the road is moved along two lines, and the
+	// tightest box is searched for each position (see lkFixLines).
 	track := f.point("gps-track")
 	requests := 0
-	tight, ok := lkTightBox(around(track.geo(), 0.025), func(b geoBBox) bool {
+	present := func(b geoBBox) bool {
 		requests++
 		code, body := get("/api/rx-coverage?z=18&bbox=" + box(b))
 		if code != http.StatusOK {
@@ -1197,23 +1396,38 @@ func TestLocationLeakOracles(t *testing.T) {
 			t.Fatalf("/api/rx-coverage: %v", err)
 		}
 		return len(fc.Features) > 0
-	})
-	if ok {
-		far, leak := c.lkBoxPlaces(tight, track.geo())
-		t.Logf("rx-coverage: %d requests; tightest box %s; farthest corner %.1f m from the exact GPS point", requests, box(tight), far)
-		if leak {
-			found["oracle:rx-coverage-bbox bbox"] = []string{fmt.Sprintf(
-				"the bbox filter places the companion's exact GPS point within %.1f m (limit: radius/2 = %.0f m)", far, lkRadiusM/2)}
-		}
-	} else {
-		t.Logf("rx-coverage: no feature in the start box")
 	}
+	at := track.geo()
+	search := func(fixes []geoPoint) []lkOracleRun {
+		var runs []lkOracleRun
+		for _, fix := range fixes {
+			res, err := f.srv.db.conn.Exec(`UPDATE client_receptions SET lat = ?, lon = ? WHERE lat = ? AND lon = ?`, fix.Lat, fix.Lon, at.Lat, at.Lon)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n, _ := res.RowsAffected(); n != 4 {
+				t.Fatalf("moved %d receptions to %v, want the track point's 4", n, fix)
+			}
+			at = fix
+			run := lkOracleRun{fix: fix}
+			run.box, run.found = lkTightBox(lkFixStartBox(track.geo()), present)
+			runs = append(runs, run)
+			t.Logf("rx-coverage: fix %.6f,%.6f → tightest box %s (found %v), farthest corner %.1f m from the fix",
+				fix.Lat, fix.Lon, box(run.box), run.found, lkFarCornerM(run.box, fix))
+		}
+		return runs
+	}
+	near, wide := lkFixLines(track.geo())
+	if leak := lkOracleVerdict(search(near), search(wide), lkRadiusM); leak != "" {
+		found["oracle:rx-coverage-bbox bbox"] = []string{leak}
+	}
+	t.Logf("rx-coverage: %d requests", requests)
 
 	// The planner snaps its box to a grid, so the listing can only place a
 	// node to a grid cell; the check holds it to that.
 	rep := f.point("repeater")
 	requests = 0
-	tight, ok = lkTightBox(around(rep.geo(), 0.15), func(b geoBBox) bool {
+	tight, ok := lkTightBox(around(rep.geo(), 0.15), func(b geoBBox) bool {
 		requests++
 		code, body := get("/api/planner/coverage?bbox=" + fmt.Sprintf("%.3f,%.3f,%.3f,%.3f", b.S, b.W, b.N, b.E))
 		if code == http.StatusBadRequest {
@@ -1346,6 +1560,23 @@ func TestLeakHelperBodies(t *testing.T) {
 		{"inside a JSON string", `{"decoded_json":"{\"lat\":48.1391,\"lon\":11.5799}"}`, "coords"},
 		{"tight cell on the exact position", lkHexFeature(lkOff(points[0], 0.00205, 0.0024), 0.0008), "cell"},
 
+		// Cell polygons and the text check. A vertex 1.5 km away that shares
+		// three (or four) decimals with an exact coordinate is chance.
+		{"cell vertex sharing 3 decimals", lkRingFeature(`[11.5761999,48.1502],[11.61,48.1502],[11.61,48.1371999],[11.5761999,48.1502]`), ""},
+		{"cell vertex sharing 4 decimals", lkRingFeature(`[11.5761099,48.1502],[11.61,48.1502],[11.61,48.1371099],[11.5761099,48.1502]`), ""},
+		{"multipolygon vertex sharing 3 decimals", `{"type":"Feature","geometry":{"type":"MultiPolygon","coordinates":[[[[11.5761999,48.1502],[11.61,48.1502],[11.61,48.16],[11.5761999,48.1502]]]]}}`, ""},
+		// The exact value itself, at 5 decimals or more, is no chance.
+		{"cell vertex at the exact lon, 5 decimals", lkRingFeature(`[11.57612,48.1502],[11.61,48.1502],[11.61,48.17],[11.57612,48.1502]`), "text"},
+		{"cell vertex at the exact lat, 6 decimals", lkRingFeature(`[11.59,48.137154],[11.61,48.1502],[11.61,48.17],[11.59,48.137154]`), "text"},
+		{"cell vertex as micro integers", lkRingFeature(`[11576124,48137154],[11610000,48150200],[11610000,48170000],[11576124,48137154]`), "text"},
+		// Only the vertices are exempt: not the cell's properties, not a
+		// point feature, not a polygon outside a feature, not other JSON.
+		{"cell property sharing 3 decimals", `{"type":"Feature","properties":{"note":"near 48.1371999"},"geometry":{"type":"Polygon","coordinates":[[[11.59,48.15],[11.61,48.15],[11.61,48.17],[11.59,48.15]]]}}`, "text"},
+		{"point feature sharing 3 decimals", `{"type":"Feature","geometry":{"type":"Point","coordinates":[11.5761999,48.3]}}`, "text"},
+		{"bare polygon sharing 3 decimals", `{"area":{"type":"Polygon","coordinates":[[[11.5761999,48.3],[11.61,48.3],[11.61,48.4],[11.5761999,48.3]]]}}`, "text"},
+		{"number beside a cell sharing 3 decimals", `{"features":[` + lkRingFeature(`[11.59,48.15],[11.61,48.15],[11.61,48.17],[11.59,48.15]`) + `],"centre_lon":11.5761999}`, "text"},
+		{"plain number sharing 3 decimals", `{"x":48.1371999}`, "text"},
+
 		// Distances.
 		{"exact distance, 3 decimals", fmt.Sprintf(`{"distance_km":%.3f}`, exactKm), "dist"},
 		{"exact distance, 1 decimal", fmt.Sprintf(`{"edges":[{"distKm":%.1f}]}`, exactKm), "dist"},
@@ -1375,6 +1606,27 @@ func TestLeakHelperBodies(t *testing.T) {
 	}
 	if got := lkChecks(c.checkAs([]byte(stats), nil, true)); got != "dist" {
 		t.Errorf("unnamed distance with allDist: checks = %q, want dist", got)
+	}
+
+	// Histogram bins: an edge or a width that equals an exact distance is the
+	// grid's doing; a real distance beside it, in the same body, is caught.
+	edge := fmt.Sprintf("%.1f", exactKm)
+	hist := `{"distHistogram":{"bins":[{"x":` + edge + `,"w":` + edge + `,"count":2},{"x":3.5,"w":0.5,"count":0}],"min":3.25,"max":%s},"topHops":[{"dist":%s}]}`
+	clean := fmt.Sprintf(hist, "30.25", "30.25")
+	if got := lkChecks(c.checkAs([]byte(clean), nil, true)); got != "" {
+		t.Errorf("histogram bin edges: checks = %q, want none", got)
+	}
+	for name, body := range map[string]string{
+		"the histogram's max":      fmt.Sprintf(hist, edge, "30.25"),
+		"a hop beside the bins":    fmt.Sprintf(hist, "30.25", edge),
+		"x outside a bins array":   `{"summary":{"x":` + edge + `,"w":0.5,"count":1}}`,
+		"a bin with another field": `{"bins":[{"x":` + edge + `,"w":0.5,"count":1,"avg":` + edge + `}]}`,
+		"a distance key in a bin":  `{"bins":[{"x":1.5,"w":0.5,"count":1,"dist":` + edge + `}]}`,
+		"nested under a bin":       `{"bins":[{"x":1.5,"w":0.5,"count":1,"hops":[{"x":` + edge + `,"w":0.5}]}]}`,
+	} {
+		if got := lkChecks(c.checkAs([]byte(body), nil, true)); got != "dist" {
+			t.Errorf("%s: checks = %q, want dist: %s", name, got, body)
+		}
 	}
 
 	// A distance from a point of the request.
@@ -1431,6 +1683,36 @@ func TestLeakHelperTickets(t *testing.T) {
 	skipped.add("/api/x", c.check([]byte(`{"lat":48.137154,"lon":11.576124}`), nil), map[string]string{"coords": "why"})
 	if _, ok := skipped["/api/x coords"]; ok || len(skipped["/api/x text"]) == 0 {
 		t.Errorf("skip: found = %v, want text only", skipped)
+	}
+}
+
+// lkRingFeature is a GeoJSON polygon feature with the given ring ([lon,lat]
+// pairs as JSON).
+func lkRingFeature(ring string) string {
+	return `{"type":"Feature","properties":{"count":3},"geometry":{"type":"Polygon","coordinates":[[` + ring + `]]}}`
+}
+
+func TestLeakHelperWithoutCells(t *testing.T) {
+	cell := lkRingFeature(`[11.5761999,48.1502],[11.61,48.1502],[11.61,48.17],[11.5761999,48.1502]`)
+	for name, tc := range map[string]struct {
+		body string
+		gone bool // the vertices are taken out
+	}{
+		"feature collection": {`{"type":"FeatureCollection","features":[` + cell + `],"gaps":[` + cell + `]}`, true},
+		"no polygon":         {`{"lat":11.5761999,"geometry":{"type":"Point","coordinates":[11.5761999,48.15]}}`, false},
+		"not a feature":      {`{"geometry":{"type":"Polygon","coordinates":[[[11.5761999,48.15]]]}}`, false},
+		"not JSON":           {`<html>11.5761999</html>`, false},
+	} {
+		got := lkWithoutCells([]byte(tc.body))
+		if has := strings.Contains(got, "11.5761999"); has == tc.gone {
+			t.Errorf("%s: vertices kept = %v, want %v: %s", name, has, !tc.gone, got)
+		}
+		if !tc.gone && got != tc.body {
+			t.Errorf("%s: body changed: %s", name, got)
+		}
+		if tc.gone && !strings.Contains(got, `"count":3`) {
+			t.Errorf("%s: properties lost: %s", name, got)
+		}
 	}
 }
 
@@ -1570,5 +1852,84 @@ func TestLeakHelperTightBox(t *testing.T) {
 	stub := newLKChecker([]lkPoint{pt}, func(q lkPoint) geoPoint { return q.geo() }, nil, 1000)
 	if _, leak := stub.lkBoxPlaces(at(p), p); !leak {
 		t.Error("with an identity Fuzz the exact point must still be a leak")
+	}
+}
+
+// The bbox oracle's verdict on model servers: one that filters on the fix,
+// and ones that bin fixes to the centre of a square cell of a given side,
+// with the grid shifted every way (so the fix is at the centre, on an edge,
+// in a corner): the verdict must depend on the cell size alone.
+func TestLeakHelperOracleVerdict(t *testing.T) {
+	from := geoPoint{Lat: 37.445987, Lon: -122.161728}
+	near, wide := lkFixLines(from)
+	if d := lkDistM(near[0], near[lkFixSteps-1]); math.Abs(d-160) > 2 {
+		t.Fatalf("near line spans %.1f m, want 160", d)
+	}
+	if d := lkDistM(wide[0], wide[1]); math.Abs(d-600) > 5 {
+		t.Fatalf("wide line steps %.1f m, want 600", d)
+	}
+	start := lkFixStartBox(from)
+	// binned(side, …) is where a server with cells of side metres puts fix.
+	binned := func(sideM, shiftLat, shiftLon float64) func(geoPoint) geoPoint {
+		return func(fix geoPoint) geoPoint {
+			if sideM == 0 {
+				return fix
+			}
+			h := sideM / 111_320
+			w := sideM / (111_320 * math.Cos(37.4*math.Pi/180))
+			return geoPoint{
+				Lat: (math.Floor(fix.Lat/h-shiftLat) + 0.5 + shiftLat) * h,
+				Lon: (math.Floor(fix.Lon/w-shiftLon) + 0.5 + shiftLon) * w,
+			}
+		}
+	}
+	run := func(place func(geoPoint) geoPoint, fixes []geoPoint) []lkOracleRun {
+		var out []lkOracleRun
+		for _, fix := range fixes {
+			q := place(fix)
+			r := lkOracleRun{fix: fix}
+			r.box, r.found = lkTightBox(start, func(b geoBBox) bool {
+				return q.Lat >= b.S && q.Lat <= b.N && q.Lon >= b.W && q.Lon <= b.E
+			})
+			if !r.found {
+				t.Fatalf("fix %v placed at %v is outside the start box %+v", fix, q, start)
+			}
+			out = append(out, r)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name  string
+		sideM float64
+		leak  bool
+	}{
+		{"filter on the fix", 0, true},
+		{"10 m cells", 10, true},
+		{"30 m cells", 30, true},
+		{"100 m cells", 100, true},
+		{"300 m cells", 300, true},
+		{"cells of 2 × radius", 2000, false},
+		{"cells of 4 × radius", 4000, false},
+	} {
+		for i := 0; i < 10; i++ {
+			for j := 0; j < 10; j++ {
+				place := binned(tc.sideM, float64(i)/10, float64(j)/10)
+				got := lkOracleVerdict(run(place, near), run(place, wide), 1000)
+				if (got != "") != tc.leak {
+					t.Fatalf("%s, grid shifted %d/10, %d/10: verdict %q, want leak = %v", tc.name, i, j, got, tc.leak)
+				}
+				if tc.sideM == 0 {
+					break
+				}
+			}
+			if tc.sideM == 0 {
+				break
+			}
+		}
+	}
+	// Coverage that is never found tells nothing.
+	hidden := []lkOracleRun{{}, {}, {}, {}, {}}
+	if got := lkOracleVerdict(hidden, hidden, 1000); got != "" {
+		t.Errorf("nothing found: verdict %q", got)
 	}
 }
