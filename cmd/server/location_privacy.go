@@ -39,7 +39,26 @@ import (
 //   Packets:       for an ADVERT whose payload carries a location, every packet
 //                  and observation the server serves (HTTP and WebSocket) has
 //                  raw_hex null, decoded_json without the lat, lon and signature keys,
-//                  and "location_hidden": true. hash stays.
+//                  and "location_hidden": true. hash stays. Such a packet also
+//                  carries "frame_bytes" (int, the frame length) and "frame_head"
+//                  (hex of the frame header and path bytes only — never payload),
+//                  so size filters and hash-size badges keep working. An ADVERT
+//                  frame that holds signature bytes but no readable appdata flags
+//                  byte is treated as located (fail closed), and a hidden packet's
+//                  detail never falls back to any observation or canonical frame.
+//   Client (off):  when the feature is off /api/config/client omits the
+//                  "locationPrivacy" key entirely (byte-identical to upstream).
+//   Companions:    with the feature on, per-companion views (?rx=<pubkey> on
+//                  /api/rx-coverage, /api/rf-noise, coverage gaps) are served only
+//                  to that companion's linked owner or an admin; aggregate views
+//                  stay public.
+//   Startup:       refuse to start when CORESCOPE_LOCATION_SECRET is set but the
+//                  block does not say "enabled": false explicitly; on a config.json
+//                  that fails to parse, refuse only when the env secret is set or
+//                  the raw file has a locationPrivacy block with "enabled": true.
+//   Offsets:       the offset of a served point derives from the cell only
+//                  (row, col), so co-located nodes share one approximate point and
+//                  cannot be averaged.
 //
 // Geometry (B1): metre-based grid, cell side s = 0.4·R, origin offset derived
 // from HMAC-SHA256(secret, "grid"); a node keeps its anchor cell while its
