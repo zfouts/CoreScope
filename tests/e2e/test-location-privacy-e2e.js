@@ -30,6 +30,12 @@ async function main() {
   const cfg = await getJson('/api/config/client');
   const lp = cfg && cfg.locationPrivacy;
   if (!lp || lp.enabled !== true) {
+    // CI points this suite at a dedicated privacy-on server: there a skip
+    // would hide a broken setup, so LOCPRIV_REQUIRE=1 turns it into a failure.
+    if (process.env.LOCPRIV_REQUIRE === '1') {
+      console.error('FAIL: LOCPRIV_REQUIRE=1 but /api/config/client reports location privacy off');
+      process.exit(1);
+    }
     console.log('SKIP (location privacy off on this server)');
     process.exit(0);
   }
