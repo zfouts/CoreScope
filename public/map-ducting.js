@@ -24,6 +24,17 @@
  *       never stops the event, so the page's own map clicks (Planner sites,
  *       Live paths) work inside the forecast area. The cell popup opens only
  *       when the click did nothing else (see _watchClicks).
+ *       Deep link (#2459, on #/map, #/live, #/tools/planner): the hash's
+ *       duct_t=<unix seconds, a whole hour> is shown as a user pick when the
+ *       forecast has that hour (else the current hour); the user's picks,
+ *       Now and on/off are written back as duct=1 / duct_t with
+ *       history.replaceState, other parameters untouched (URLState.
+ *       parseDuctLink / ductLinkHash in url-state.js).
+ *   layer.mcUserToggle(on) -> called by the layers picker when the user (not
+ *       the overlay set) ticks or unticks the overlay
+ *   window.MC_ductLinkOverlays() -> ['ducting'] when the page's hash asks for
+ *       the overlay (duct=1 or a duct_t), else []: MC_attachAutoTiles'
+ *       viewOverlays, shown for this page view without saving the preference
  *   layer.openCellPopup(latlng) -> true when a cell with data at the shown
  *       hour is there and its popup opened
  *   window.MC_ductCellAt(grid, lat, lon) -> index into the cells of the cell
@@ -105,11 +116,9 @@
  *     the previous image stays until the next one is drawn.
  *   - A view on a world copy (centre beyond +-180) asks for the wrapped box
  *     and draws it shifted by the copy's multiple of 360 (shiftFor).
- *   - Deep link (#/map only): picking a time writes duct=1&ductT=<unix>
- *     (history.replaceState, debounced), the default time removes ductT,
- *     removing the overlay removes both. ductT is read when the overlay is
- *     added and used when it is a stored time. map.js turns the overlay on
- *     for duct=1.
+ *   - Deep link: the one described above (#2459, duct=1 / duct_t), with a
+ *     stored time in place of the forecast hour. Picking the default time
+ *     (not only Now) takes duct_t out again.
  *   - GET /api/ducting/links?days=<historyDays> (on add and with each meta
  *     refresh): node pairs heard directly without terrain line of sight
  *     (losMethod "terrain"; else beyond the smooth-earth radio horizon).
@@ -125,7 +134,6 @@
  *   window.MC_ductWindowStep(box, nativeStep, maxCells) -> the server's step
  *   window.MC_ductBoxCovers(outer, inner), window.MC_ductLru(max)
  *   window.MC_ductTimeLabel(t, now)     -> 'time · forecast' / '· analysis, N h ago'
- *   window.MC_ductHashTime(hash), window.MC_ductHashWith(hash, updates)
  *   window.MC_ductLinksAt(links, t, winS) -> [{ link, recs, kind }]
  *   window.MC_ductLinkKind(reception)   -> 'duct' | 'plain' | 'nodata'
  *   window.MC_ductSegDist(p, a, b)      -> px from point p to segment ab
@@ -212,7 +220,6 @@
   var GRID_STEP_S = 3 * HOUR_S;         // spacing of the stored times
   var WINDOW_PAD = 0.3;                 // view padding on each side
   var WINDOW_DEBOUNCE_MS = 250;
-  var HASH_DEBOUNCE_MS = 300;
   var LRU_MAX = 24;
   var GRID_MAX_CELLS = 4000;            // the server's cap per window
   var STEP_LADDER = [1, 2, 4, 8, 16];   // x the native step (0.5 -> 0.5..8 deg)
@@ -478,6 +485,7 @@
   var PANEL_KEY_STEP = 16;              // px per arrow key on the move handle (Shift: x4)
   var NARROW_Q = '(max-width: 600px)';  // phones: legend collapsed by default, no moving
   var TL_IDLE_MS = 120;                 // no scroll for this long = the scroll has ended
+  var LINK_WRITE_MS = 300;              // a pick unchanged for this long is written to the URL hash
   var TL_DRAG_PX = 4;                   // a mouse press moving less than this is a click
   var panelSeq = 0;                     // ids unique per panel (several maps on a page)
 
@@ -1053,24 +1061,6 @@
     return s + 'analysis, ' + (h < 48 ? h + ' h' : Math.round(h / 24) + ' d') + ' ago';
   }
 
-  // The deep-linked time: ductT of a #/map hash (whole seconds), else null.
-  function hashTime(hash) {
-    var U = (typeof window !== 'undefined' && window.URLState) || null;
-    if (!U) return null;
-    var p = U.parseHash(hash);
-    if (p.route !== 'map') return null;
-    var v = p.params.ductT;
-    return (typeof v === 'string' && /^\d{1,12}$/.test(v)) ? Number(v) : null;
-  }
-
-  // `hash` with `updates` applied (null / '' removes a key); null when the
-  // hash is not the map page's, so nothing is written elsewhere.
-  function hashWith(hash, updates) {
-    var U = (typeof window !== 'undefined' && window.URLState) || null;
-    if (!U || U.parseHash(hash).route !== 'map') return null;
-    return U.updateHashParams(updates, hash);
-  }
-
   function num(v) { return (v != null && v !== '' && isFinite(Number(v))) ? Number(v) : null; }
 
   // The line kind of a reception: 'duct' (the emphasized colour) when half
@@ -1430,12 +1420,15 @@
         this._lru = new Lru(LRU_MAX);
         this._dataKey = '';        // key and box of the window in _data
         this._dataBox = null;
+        this._linkT = null;        // the link's forecast hour, until the forecast arrives
+        this._linkTimer = null;
       },
 
       onAdd: function (map) {
         this._map = map;
         var gen = ++this._gen;
         this._gridMode = isGridMode();
+        this._linkT = linkState().t;
         this._cells = [];
         this._edge = this._lora = null;
         this._edgeColor = this._loraKey = '';
@@ -1474,6 +1467,8 @@
         this._timerMs = 0;
         cancelLater(this._hourTimer);
         this._hourTimer = null;
+        cancelLater(this._linkTimer);
+        this._linkTimer = null;
         if (this._abort) { try { this._abort.abort(); } catch (_) {} this._abort = null; }
         var m = map || this._map;
         if (this._onTheme) { try { window.removeEventListener('theme-changed', this._onTheme); } catch (_) {} this._onTheme = null; }
@@ -2051,13 +2046,14 @@
         return !!(this._tlTimes().length >= 2 && this._tlLayout);
       },
 
-      // Shows time i as the user's pick. Grid mode goes through _pickTime
-      // (the deep link, debounced, and the window fetch), as every pick there
-      // does; fromScroll / smooth as in _setIndex.
+      // Shows time i as the user's pick, and writes it to the link once it
+      // has settled. Grid mode goes through _pickTime (which also fetches the
+      // window), as every pick there does; fromScroll / smooth as in _setIndex.
       _choose: function (i, fromScroll, smooth) {
         if (this._gridMode) { this._pickTime(i, fromScroll, smooth); return; }
         this._userPicked = true;
         this._setIndex(i, fromScroll, smooth);
+        this._linkLater();
       },
 
       // One frame of scrolling: the time under the centre becomes the shown
@@ -2141,7 +2137,7 @@
       _pick: function (i) {
         if (!(i >= 0) || i >= this._tlTimes().length) return;
         if (i === this._tlIndex()) {
-          if (!this._gridMode) this._userPicked = true;
+          if (!this._gridMode) { this._userPicked = true; this._linkLater(); }
           this._tlScrollTo(i, true);
         } else this._choose(i, false, true);
       },
@@ -2154,7 +2150,7 @@
 
       // Back to the current time (the latest <= now), and following it again
       // on refreshes. Grid mode: through _pickTime, which, on the default
-      // time, takes ductT out of the link.
+      // time, takes duct_t out of the link.
       _toNow: function () {
         var times = this._tlTimes();
         if (!times.length) return;
@@ -2163,6 +2159,38 @@
         this._userPicked = false;
         if (i === this._idx) this._tlScrollTo(i, true);
         else this._setIndex(i, false, true);
+        this._linkLater();
+      },
+
+      // ── deep link (#2459) ──
+      // The hash's duct / duct_t follow what the user does, never the clock
+      // or a refresh. Picks are written once they have settled (one write
+      // however many keys, clicks or scroll frames led there).
+      _linkLater: function () {
+        if (!onLinkRoute()) return;
+        var self = this, gen = this._gen, from = pageRoute();
+        cancelLater(this._linkTimer);
+        this._linkTimer = later(function () {
+          self._linkTimer = null;
+          // Only on the page the pick was made on: after a navigation the
+          // hash is the next page's, even before this layer is removed.
+          if (gen === self._gen && pageRoute() === from) self._linkWrite(true);
+        }, LINK_WRITE_MS);
+      },
+
+      // on: the overlay is shown; the time goes in only while the user picked it.
+      _linkWrite: function (on) {
+        var t = this._gridMode ? this._shownT : this._shown;
+        writeLink(on, on && this._userPicked && t != null ? t : null);
+      },
+
+      // The user ticked or unticked the overlay in the layers picker (called
+      // by map-tile-providers.js; the overlay set's own adds and removes,
+      // and a page going away, do not come here).
+      mcUserToggle: function (on) {
+        cancelLater(this._linkTimer);
+        this._linkTimer = null;
+        this._linkWrite(!!on);
       },
 
       // The strip's ticks and labels; rebuilt only when the times change.
@@ -2629,6 +2657,15 @@
         var prevTime = this._shown != null ? this._shown : null;
         this._build();
         var idx = ductTimeIndex(d.times, Date.now() / 1000);
+        // The link's hour, read once: shown as the user's pick when the
+        // forecast has it, otherwise ignored.
+        if (this._linkT != null) {
+          if (d.times.indexOf(this._linkT) >= 0) {
+            prevTime = this._linkT;
+            this._userPicked = true;
+          }
+          this._linkT = null;
+        }
         if (this._userPicked) {
           var keep = prevTime != null ? d.times.indexOf(prevTime) : -1;
           if (keep >= 0) idx = keep;
@@ -2689,7 +2726,6 @@
         this._shownLinks = [];
         this._winErr = false;
         try { this._linkGroup = L.layerGroup(); map.addLayer(this._linkGroup); } catch (_) { this._linkGroup = null; }
-        try { this._wantT = hashTime(location.hash); } catch (_) { this._wantT = null; }
         this._onView = function () {
           if (gen !== self._gen) return;
           self._queueWindow();
@@ -2707,7 +2743,6 @@
         if (map && this._onView) { try { map.off('moveend zoomend', this._onView); } catch (_) {} }
         this._onView = null;
         this._cancelWindowTimer();
-        if (this._hashTimer != null) { try { clearTimeout(this._hashTimer); } catch (_) {} this._hashTimer = null; }
         if (this._winAbort) { try { this._winAbort.abort(); } catch (_) {} this._winAbort = null; }
         if (this._linksAbort) { try { this._linksAbort.abort(); } catch (_) {} this._linksAbort = null; }
         this._winFetchKey = this._wantKey = '';
@@ -2716,9 +2751,6 @@
         this._linkGroup = this._linkPopup = this._linkPopupId = null;
         this._shownLinks = [];
         this._linksKey = this._winKey = '';
-        // Unticking the overlay takes it out of the link too (a no-op off
-        // the map page: hashWith answers null there).
-        this._replaceHash({ duct: null, ductT: null });
       },
 
       // A JSON GET through CSApi; ctrl = an AbortController or null.
@@ -2794,11 +2826,15 @@
       _showMeta: function (prevT) {
         var times = this._meta.times, idx = ductTimeIndex(times, Date.now() / 1000);
         if (prevT == null && this._sel >= 0 && this._shownT != null) prevT = this._shownT;
-        if (this._wantT != null) {
-          var w = times.indexOf(this._wantT);
-          this._wantT = null;
-          if (w >= 0) { idx = w; this._userPicked = true; }
-        } else if (this._userPicked) {
+        // The link's time (onAdd), read once: shown as the user's pick when
+        // it is stored, otherwise ignored.
+        var linked = -1;
+        if (this._linkT != null) {
+          linked = times.indexOf(this._linkT);
+          this._linkT = null;
+        }
+        if (linked >= 0) { idx = linked; this._userPicked = true; }
+        else if (this._userPicked) {
           var k = prevT != null ? times.indexOf(prevT) : -1;
           if (k >= 0) idx = k; else this._userPicked = false;
         }
@@ -2828,27 +2864,13 @@
       // The user picked time i on the timeline (scroll: at most once per
       // frame, see _tlOnScroll; click, key, step buttons, Now): back on the
       // default time it follows "now" again and leaves the link; any other
-      // time is kept and linked. fromScroll / smooth as in _setTime.
+      // time is kept and linked (_linkLater). fromScroll / smooth as in _setTime.
       _pickTime: function (i, fromScroll, smooth) {
         var m = this._meta;
         if (!m || i < 0 || i >= m.times.length) return;
         this._userPicked = i !== ductTimeIndex(m.times, Date.now() / 1000);
         this._setTime(i, fromScroll, smooth);
-        var self = this;
-        if (this._hashTimer != null) { try { clearTimeout(this._hashTimer); } catch (_) {} }
-        this._hashTimer = later(function () {
-          self._hashTimer = null;
-          if (!self._map || !self._meta) return;
-          var t = self._meta.times[self._sel];
-          self._replaceHash(self._userPicked && t != null ? { duct: '1', ductT: String(t) } : { ductT: null });
-        }, HASH_DEBOUNCE_MS);
-      },
-
-      _replaceHash: function (updates) {
-        try {
-          var h = hashWith(location.hash, updates);
-          if (h != null && h !== location.hash) history.replaceState(history.state, '', h);
-        } catch (_) { /* no history: nothing to link */ }
+        this._linkLater();
       },
 
       // Shows stored time i. fromScroll: the user's scroll put it under the
@@ -3176,6 +3198,42 @@
     });
   }
 
+  // ── deep link (#2459): duct / duct_t in the URL hash ──
+  // Parsing and serialising live in url-state.js (URLState.parseDuctLink /
+  // ductLinkHash); here only location is read and history written.
+  function pageHash() {
+    try { return (typeof location !== 'undefined' && location && location.hash) || ''; } catch (_) { return ''; }
+  }
+
+  function pageRoute() { return pageHash().split('?')[0]; }
+
+  function onLinkRoute() {
+    var U = window.URLState;
+    return !!(U && U.isDuctRoute && U.isDuctRoute(pageHash()));
+  }
+
+  // { on, t } of the page's hash; off when there is no link (or no URLState).
+  function linkState() {
+    var U = window.URLState;
+    try { if (U && U.parseDuctLink) return U.parseDuctLink(pageHash()); } catch (_) {}
+    return { on: false, t: null };
+  }
+
+  // replaceState, never location.hash =: app.js re-inits the page on
+  // hashchange, and a pick must not add a history entry.
+  function writeLink(on, t) {
+    try {
+      var U = window.URLState, cur = pageHash();
+      var next = U && U.ductLinkHash ? U.ductLinkHash(cur, on, t) : null;
+      if (next == null || next === cur) return;
+      history.replaceState(history.state, '', next);
+    } catch (_) { /* history unavailable */ }
+  }
+
+  // The overlay ids the page's link turns on for this page view, for
+  // MC_attachAutoTiles({ viewOverlays }): never saved as the preference.
+  window.MC_ductLinkOverlays = function () { return linkState().on ? ['ducting'] : []; };
+
   var LayerClass = null;
   window.MC_createDuctingLayer = function (opts) {
     if (typeof L === 'undefined' || !L.Layer) return null;
@@ -3198,8 +3256,6 @@
   window.MC_ductBoxCovers = boxCovers;
   window.MC_ductLru = function (max) { return new Lru(max); };
   window.MC_ductTimeLabel = timeLabel;
-  window.MC_ductHashTime = hashTime;
-  window.MC_ductHashWith = hashWith;
   window.MC_ductLinksAt = linksAt;
   window.MC_ductLinkKind = linkKind;
   window.MC_ductSegDist = segDist;

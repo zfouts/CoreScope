@@ -2,7 +2,7 @@
  * E2E for the tropospheric-ducting overlay with the stored global grid
  * (ducting.source "gfs-grid", the default): GET /api/ducting/meta, the
  * windows of /api/ducting/grid, the history/forecast timeline in the
- * movable, collapsible panel, the duct=1&ductT deep link and the observed
+ * movable, collapsible panel, the duct=1&duct_t deep link and the observed
  * long links of /api/ducting/links,
  * against a real CoreScope server. The Open-Meteo source has its own suite
  * (test-map-ducting-e2e.js); both share tests/e2e/lib/ducting-e2e.js.
@@ -308,7 +308,7 @@ async function run() {
       });
       assert(cut.oneLine && cut.timeShown, 'time line cut or wrapped: ' + JSON.stringify(cut));
       const h = await hashParams(page);
-      assert(!('ductT' in h), 'default time written to the URL: ' + JSON.stringify(h));
+      assert(!('duct_t' in h), 'default time written to the URL: ' + JSON.stringify(h));
     });
 
     await test('the field matches the window at the default time; LoRa cells, and only they, outlined', async () => {
@@ -334,7 +334,7 @@ async function run() {
       assert(!f.probs.length, f.probs.slice(0, 5).join(' | '));
       assert((await fieldSum(page)) !== sum0, 'field image did not change');
       assert((await pageState(page)).fields.length === 1, 'the pick added a field image');
-      await waitHash(page, { duct: '1', ductT: String(times[last]) });
+      await waitHash(page, { duct: '1', duct_t: String(times[last]) });
     });
 
     await test('the oldest stored time (Home) is labelled analysis, days ago, and linked', async () => {
@@ -343,14 +343,14 @@ async function run() {
       await waitWindow(page, times[0]);
       const s = await timelineState(page);
       assert(/· analysis, \d+ d ago$/.test(s.label), 'label: ' + s.label);
-      await waitHash(page, { duct: '1', ductT: String(times[0]) });
+      await waitHash(page, { duct: '1', duct_t: String(times[0]) });
     });
 
-    await test('back on the default time: ductT leaves the URL and the window comes from memory', async () => {
+    await test('back on the default time: duct_t leaves the URL and the window comes from memory', async () => {
       const before = gridReqs(seen).length;
       await scrollToTime(page, defIdx);
       await waitWindow(page, times[defIdx]);
-      await waitHash(page, { duct: '1', ductT: null });
+      await waitHash(page, { duct: '1', duct_t: null });
       assert(gridReqs(seen).length === before, 'refetched a window it held: ' + JSON.stringify(gridReqs(seen).slice(before)));
       assert((await fieldSum(page)) === sum0, 'default-time field differs from the first drawing');
     });
@@ -572,17 +572,17 @@ async function run() {
       const st = await pageState(page);
       assert(!st.cells && !st.lora.length && !st.fields.length && st.panels === 0 && st.legends === 0 && st.times === 0, 'left over: ' + JSON.stringify({ cells: st.cells, lora: st.lora.length, fields: st.fields.length }));
       assert(!Object.keys(await page.evaluate(inPageLinks)).length, 'link lines left on the map');
-      await waitHash(page, { duct: null, ductT: null });
+      await waitHash(page, { duct: null, duct_t: null });
     });
 
     await test('map page has no page errors', async () => { assert(!page.__errors.length, page.__errors.slice(0, 3).join(' | ')); });
 
     // ── Deep link ──
-    await test('deep link #/map?duct=1&ductT=<stored time> turns the overlay on at that time', async () => {
+    await test('deep link #/map?duct=1&duct_t=<stored time> turns the overlay on at that time', async () => {
       const k = Math.max(0, defIdx - 2);
       const dp = await track({ theme: 'light' });
       const ds = trackDucting(dp.page);
-      await gotoRoute(dp.page, `#/map?duct=1&ductT=${times[k]}`);
+      await gotoRoute(dp.page, `#/map?duct=1&duct_t=${times[k]}`);
       await waitWindow(dp.page, times[k]);
       const s = await timelineState(dp.page);
       assert(s.value === k, `timeline at ${s.value} want ${k}`);
@@ -591,13 +591,13 @@ async function run() {
       assert(gridReqs(ds).length >= 1 && gridReqs(ds).every(r => r.q.t === String(times[k])), 'windows fetched: ' + JSON.stringify(gridReqs(ds)));
       assert(await dp.page.locator('label[data-tile-overlay-id="ducting"] input').first().isChecked(), 'overlay not ticked');
       const h = await hashParams(dp.page);
-      assert(h.duct === '1' && h.ductT === String(times[k]), 'hash: ' + JSON.stringify(h));
+      assert(h.duct === '1' && h.duct_t === String(times[k]), 'hash: ' + JSON.stringify(h));
       assert(!dp.page.__errors.length, dp.page.__errors.slice(0, 3).join(' | '));
     });
 
     await test('a deep link to a time that is not stored shows the default time', async () => {
       const dp = await track({ theme: 'light' });
-      await gotoRoute(dp.page, `#/map?duct=1&ductT=${times[defIdx] + 60}`);
+      await gotoRoute(dp.page, `#/map?duct=1&duct_t=${times[defIdx] + 60}`);
       await waitWindow(dp.page, times[defIdx]);
       const s = await timelineState(dp.page);
       assert(s.value === defIdx, `timeline at ${s.value} want ${defIdx}`);
@@ -610,7 +610,7 @@ async function run() {
       const tp = await track({ theme: 'light' });
       const tpage = tp.page;
       const ts = trackDucting(tpage);
-      await test('scrolling the strip into the past (mouse wheel) picks an analysis time; ductT is written once, after the debounce', async () => {
+      await test('scrolling the strip into the past (mouse wheel) picks an analysis time; duct_t is written once, after the debounce', async () => {
         await gotoRoute(tpage, '#/map?duct=1');
         await waitWindow(tpage, times[defIdx]);
         await tpage.mouse.move(5, 5);
@@ -633,10 +633,10 @@ async function run() {
         const s = await timelineState(tpage);
         assert(/^\S.+ · analysis, \d+ h ago$/.test(s.label) && !/^Time/.test(s.label), 'label: ' + s.label);
         await waitWindow(tpage, times[k]);
-        await waitHash(tpage, { duct: '1', ductT: String(times[k]) });
+        await waitHash(tpage, { duct: '1', duct_t: String(times[k]) });
         await sleep(500);
-        const w = await tpage.evaluate(() => window.__ductWrites.filter(h => /ductT=/.test(h)));
-        assert(w.length === 1 && w[0].includes('ductT=' + times[k]), 'link writes for one scroll: ' + JSON.stringify(w));
+        const w = await tpage.evaluate(() => window.__ductWrites.filter(h => /duct_t=/.test(h)));
+        assert(w.length === 1 && w[0].includes('duct_t=' + times[k]), 'link writes for one scroll: ' + JSON.stringify(w));
         assert(gridReqs(ts).some(r => r.q.t === String(times[k])), 'no window fetched for the scrolled-to time');
       });
 
@@ -652,15 +652,15 @@ async function run() {
         assert(g.length >= 1 && g.every(r => r.q.t === String(times[k])), 'windows after reload: ' + JSON.stringify(g));
         assert(await tpage.locator('label[data-tile-overlay-id="ducting"] input').first().isChecked(), 'overlay not ticked');
         const h = await hashParams(tpage);
-        assert(h.duct === '1' && h.ductT === String(times[k]), 'hash: ' + JSON.stringify(h));
+        assert(h.duct === '1' && h.duct_t === String(times[k]), 'hash: ' + JSON.stringify(h));
       });
 
-      await test('Now goes to the latest time <= now and removes ductT (the overlay stays linked)', async () => {
+      await test('Now goes to the latest time <= now and removes duct_t (the overlay stays linked)', async () => {
         await tpage.locator('.mc-duct-now').first().click();
         await waitWindow(tpage, times[defIdx]);
         const v = await settled(tpage);
         assert(v.idx === defIdx && Math.abs(v.scrollLeft - v.xs[defIdx]) <= 1, `Now picked ${v.idx}, want ${defIdx}`);
-        await waitHash(tpage, { duct: '1', ductT: null });
+        await waitHash(tpage, { duct: '1', duct_t: null });
         assert(/^\S.+ · analysis, (under 1 h|\d+ h) ago$/.test((await timelineState(tpage)).label), 'label after Now');
         assert(!tpage.__errors.length, tpage.__errors.slice(0, 3).join(' | '));
       });

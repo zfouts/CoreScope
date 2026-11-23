@@ -47,12 +47,18 @@
  *     its persistence (storage missing, null or throwing), moving it
  *     (pointer drag, arrow keys, fractions restored and re-clamped, reset,
  *     off on phones, no corner lift while moved) and its teardown
+ *   - the deep link (#2459): URLState.parseDuctLink / ductLinkHash; duct_t
+ *     shown as a user pick when it is in the forecast, else the current
+ *     hour; duct / duct_t written with replaceState once a user pick has
+ *     settled, on Now and on the user's own on/off, never by the clock, a
+ *     refresh or a teardown; viewOverlays (MC_attachAutoTiles) shows the
+ *     overlay without writing the saved 'mc-tile-overlays' preference
  *   - the timeline: built once per set of times, aria state, keys, buttons,
  *     Now, wheel, mouse drag, click, rAF-coalesced user scrolls that settle
  *     on a time, code positioning that never counts as a user pick, a
  *     strip laid out late (hidden map) positioned once it has a size; in
  *     grid mode every pick through _pickTime (once per frame while
- *     scrolling), ductT restoring the strip, Now clearing ductT, the now line
+ *     scrolling), duct_t restoring the strip, Now clearing duct_t, the now line
  *   - the legend body's height cap inside the panel, docked and moved,
  *     and the re-clamp when the long-links table loads
  *
@@ -66,6 +72,8 @@ const path = require('path');
 const assert = require('assert');
 
 const SRC = fs.readFileSync(path.join(REPO_ROOT, 'public', 'map-ducting.js'), 'utf8');
+const URL_SRC = fs.readFileSync(path.join(REPO_ROOT, 'public', 'url-state.js'), 'utf8');
+const URLState = require(path.join(REPO_ROOT, 'public', 'url-state.js'));
 const PROV = fs.readFileSync(path.join(REPO_ROOT, 'public', 'map-tile-providers.js'), 'utf8');
 const SAMPLE = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'tests', 'fixtures', 'ducting-sample.json'), 'utf8'));
 const T0 = SAMPLE.times[0], T1 = SAMPLE.times[1], T2 = SAMPLE.times[2];
@@ -293,9 +301,23 @@ function makeSandbox(opts) {
   }
   if (opts.narrow) ctx.matchMedia = (q) => ({ matches: /max-width: 600px/.test(q) });
   ctx.window = ctx;
+  // hash: the page's location.hash, a history that records replaceState
+  // (writes) and pushState (pushes), and the real url-state.js.
+  const writes = [];
+  let pushes = 0;
+  if (opts.hash != null) {
+    ctx.URLSearchParams = URLSearchParams;
+    ctx.location = { hash: opts.hash };
+    ctx.history = {
+      state: null,
+      replaceState(st, title, url) { writes.push(url); ctx.location.hash = url; },
+      pushState() { pushes++; },
+    };
+  }
   ctx.CSApi = makeApi();
   if (!opts.noLeaflet) ctx.L = makeLeaflet(stats);
   vm.createContext(ctx);
+  if (opts.hash != null) vm.runInContext(URL_SRC, ctx, { filename: 'url-state.js' });
   vm.runInContext(SRC, ctx, { filename: 'map-ducting.js' });
   // Runs the queued frames / timeouts (and what they queue in turn). The
   // timeouts are the panel's short ones; the hour tick (up to an hour away)
@@ -308,7 +330,7 @@ function makeSandbox(opts) {
   const runHourTick = () => { const i = timeouts.findIndex(t => !short(t)); if (i >= 0) timeouts.splice(i, 1)[0].fn(); };
   // What the browser does after scrollLeft changes: scroll events, then a frame.
   const settleScroll = () => { flushScroll(); runFrames(); };
-  return { ctx, stats, timers, cleared, observers, api: ctx.CSApi, vars, winL, timeouts, frames, runFrames, runTimeouts, uiTimeouts, hourTicks, runHourTick, settleScroll };
+  return { ctx, stats, timers, cleared, observers, writes, get pushes() { return pushes; }, api: ctx.CSApi, vars, winL, timeouts, frames, runFrames, runTimeouts, uiTimeouts, hourTicks, runHourTick, settleScroll };
 }
 
 // A Map-like localStorage; throwing: every call throws.
@@ -2929,20 +2951,6 @@ test('grid: MC_ductTimeLabel says forecast ahead of now, analysis and how long a
   assert.ok(ctx.MC_ductTimeLabel(GT, GT).indexOf(' · ') > 0, 'the time comes first');
 });
 
-test('grid: MC_ductHashTime / MC_ductHashWith read and write ductT on the map page only', () => {
-  const { ctx } = makeGridSandbox();
-  assert.strictEqual(ctx.MC_ductHashTime('#/map?ductT=' + GT), GT);
-  assert.strictEqual(ctx.MC_ductHashTime('#/map?lat=1&lon=2&ductT=' + GT + '&duct=1'), GT);
-  assert.strictEqual(ctx.MC_ductHashTime('#/live?ductT=' + GT), null, 'other pages are not read');
-  assert.strictEqual(ctx.MC_ductHashTime('#/map?ductT=12.5'), null);
-  assert.strictEqual(ctx.MC_ductHashTime('#/map?ductT=-3'), null);
-  assert.strictEqual(ctx.MC_ductHashTime('#/map?ductT=abc'), null);
-  assert.strictEqual(ctx.MC_ductHashTime('#/map'), null);
-  assert.strictEqual(ctx.MC_ductHashWith('#/map?lat=1&lon=2', { duct: '1', ductT: String(GT) }), '#/map?lat=1&lon=2&duct=1&ductT=' + GT);
-  assert.strictEqual(ctx.MC_ductHashWith('#/map?duct=1&ductT=5', { ductT: null }), '#/map?duct=1');
-  assert.strictEqual(ctx.MC_ductHashWith('#/packets?x=1', { ductT: '5' }), null, 'never written off the map page');
-});
-
 test('grid: MC_ductLinksAt keeps links heard within +-90 min, nearest reception first; MC_ductLinkKind', () => {
   const { ctx } = makeGridSandbox();
   const items = JSON.parse(JSON.stringify(ctx.MC_ductLinksAt(GLINKS.links, GT, 5400)));
@@ -3310,35 +3318,63 @@ test('grid: without a pick the shown time follows now on refresh', async () => {
   assert.strictEqual(s.layer._sel, 9);
 });
 
-test('grid deep link: ductT on #/map picks a stored time when added; unknown time or other page ignored', async () => {
-  const s = await mountGrid({ hash: '#/map?duct=1&ductT=' + GMETA.times[4], window: false });
+test('grid deep link: duct_t picks a stored time when added (map, live, planner); unknown time or other page ignored', async () => {
+  const s = await mountGrid({ hash: '#/map?duct=1&duct_t=' + GMETA.times[4], window: false });
   assert.strictEqual(s.layer._sel, 4);
   assert.strictEqual(s.layer._userPicked, true);
   s.flush();
   assert.ok(lastCall(s, '/api/ducting/grid').url.indexOf('t=' + GMETA.times[4] + '&') > 0);
-  const u = await mountGrid({ hash: '#/map?ductT=' + (GT + 1), window: false });
-  assert.strictEqual(u.layer._sel, 8, 'not a stored time: default');
-  const o = await mountGrid({ hash: '#/live?ductT=' + GMETA.times[4], window: false });
+  for (const t of [GT + 1, GT + 3600, GMETA.times[0] - 10800]) {
+    const u = await mountGrid({ hash: '#/map?duct_t=' + t, window: false });
+    assert.strictEqual(u.layer._sel, 8, t + ' is not a stored time: default');
+    assert.strictEqual(u.layer._userPicked, false);
+    assert.strictEqual(u.layer._linkT, null, 'read once');
+  }
+  for (const page of ['#/live', '#/tools/planner?mode=chain&']) {
+    const l = await mountGrid({ hash: page + (page.indexOf('?') < 0 ? '?' : '') + 'duct_t=' + GMETA.times[4], window: false });
+    assert.strictEqual(l.layer._sel, 4, page);
+  }
+  const o = await mountGrid({ hash: '#/packets?duct_t=' + GMETA.times[4], window: false });
   assert.strictEqual(o.layer._sel, 8);
+  // The old spelling is not read.
+  const old = await mountGrid({ hash: '#/map?duct=1&ductT=' + GMETA.times[4], window: false });
+  assert.strictEqual(old.layer._sel, 8);
 });
 
-test('grid deep link: picking writes duct=1&ductT (debounced), the default removes ductT, removal clears both', async () => {
+test('grid deep link: picking writes duct=1&duct_t (debounced), the default removes duct_t, an untick by the user clears both', async () => {
   const s = await mountGrid({ hash: '#/map?lat=52&lon=0' });
   slide(s, 2); slide(s, 3);
   assert.strictEqual(s.replaced.length, 0, 'debounced');
   s.flush();
-  assert.deepStrictEqual(s.replaced, ['#/map?lat=52&lon=0&duct=1&ductT=' + GMETA.times[3]]);
+  assert.deepStrictEqual(s.replaced, ['#/map?lat=52&lon=0&duct=1&duct_t=' + GMETA.times[3]]);
   slide(s, 8);                           // the default
   s.flush();
   assert.strictEqual(s.ctx.location.hash, '#/map?lat=52&lon=0&duct=1');
   assert.strictEqual(s.layer._userPicked, false);
   slide(s, 5); s.flush();
+  assert.strictEqual(s.ctx.location.hash, '#/map?lat=52&lon=0&duct=1&duct_t=' + GMETA.times[5]);
+  // The overlay set's own remove (a page teardown) leaves the link alone;
+  // the user's untick in the picker takes both parameters out.
+  const n = s.replaced.length;
   s.layer.onRemove(s.map);
+  assert.strictEqual(s.replaced.length, n, 'a removal alone writes nothing');
+  s.layer.onAdd(s.map);
+  slide(s, 6);                           // a pick still waiting when the user unticks
+  s.layer.mcUserToggle(false);
+  s.layer.onRemove(s.map);
+  s.flush();
   assert.strictEqual(s.ctx.location.hash, '#/map?lat=52&lon=0', 'overlay off: out of the link');
-  // Off the map page nothing is written.
-  const o = await mountGrid({ hash: '#/live' });
+  // The user's tick writes duct=1, no time (none picked yet).
+  const t = await mountGrid({ hash: '#/map?lat=52' });
+  t.layer.mcUserToggle(true);
+  assert.deepStrictEqual(t.replaced, ['#/map?lat=52&duct=1']);
+  // Live and the planner carry the link too; other pages are never written.
+  const l = await mountGrid({ hash: '#/live' });
+  slide(l, 3); l.flush();
+  assert.deepStrictEqual(l.replaced, ['#/live?duct=1&duct_t=' + GMETA.times[3]]);
+  const o = await mountGrid({ hash: '#/packets?x=1' });
   slide(o, 3); o.flush();
-  o.layer.onRemove(o.map);
+  o.layer.mcUserToggle(false);
   assert.deepStrictEqual(o.replaced, []);
 });
 
@@ -3368,7 +3404,7 @@ test('grid timeline: a user scroll goes through _pickTime, at most once per fram
   vp.fire('touchend');
   assert.strictEqual(s.replaced.length, 0, 'the deep link waits for the debounce');
   s.flush();
-  assert.deepStrictEqual(s.replaced, ['#/map?duct=1&ductT=' + GMETA.times[3]], 'one write for the whole scroll');
+  assert.deepStrictEqual(s.replaced, ['#/map?duct=1&duct_t=' + GMETA.times[3]], 'one write for the whole scroll');
   assert.ok(/ · analysis, \d+ h ago$/.test(labelText(L0)), labelText(L0));
   assert.ok(lastCall(s, '/api/ducting/grid').url.indexOf('t=' + GMETA.times[3] + '&') > 0, 'the window for the picked time');
   // Keys, the step buttons and a click pick through _pickTime too.
@@ -3411,11 +3447,11 @@ test('grid timeline: rapid keys during a smooth scroll: one _pickTime per key, n
   assert.strictEqual(L0._tlTarget, null);
   assert.deepStrictEqual(picks, [7, 6, 7, 8]);
   assert.strictEqual(L0._userPicked, false, 'back on the default time');
-  assert.ok(!/ductT=/.test(s.ctx.location.hash), 'no ductT: ' + s.ctx.location.hash);
+  assert.ok(!/duct_t=/.test(s.ctx.location.hash), 'no duct_t: ' + s.ctx.location.hash);
 });
 
-test('grid timeline: ductT from the link selects that time, counts as picked and puts the strip on it', async () => {
-  const s = await mountGrid({ hash: '#/map?duct=1&ductT=' + GMETA.times[2] });
+test('grid timeline: duct_t from the link selects that time, counts as picked and puts the strip on it', async () => {
+  const s = await mountGrid({ hash: '#/map?duct=1&duct_t=' + GMETA.times[2] });
   const L0 = s.layer, vp = L0._tl, xs = xsOf(s);
   assert.strictEqual(L0._sel, 2);
   assert.strictEqual(L0._userPicked, true);
@@ -3434,8 +3470,8 @@ test('grid timeline: ductT from the link selects that time, counts as picked and
   assert.strictEqual(vp.scrollLeft, xs[2]);
 });
 
-test('grid timeline: Now goes to the latest time <= now and takes ductT out of the link; the now line is drawn', async () => {
-  const s = await mountGrid({ hash: '#/map?lat=52&duct=1&ductT=' + GMETA.times[3] });
+test('grid timeline: Now goes to the latest time <= now and takes duct_t out of the link; the now line is drawn', async () => {
+  const s = await mountGrid({ hash: '#/map?lat=52&duct=1&duct_t=' + GMETA.times[3] });
   const L0 = s.layer, vp = L0._tl, xs = xsOf(s), lay = L0._tlLayout;
   assert.strictEqual(L0._sel, 3);
   // The now line sits between history and forecast.
@@ -3449,8 +3485,8 @@ test('grid timeline: Now goes to the latest time <= now and takes ductT out of t
   assert.strictEqual(L0._userPicked, false);
   assert.strictEqual(vp.scrollLeft, xs[8]);
   s.flush();
-  assert.strictEqual(s.ctx.location.hash, '#/map?lat=52&duct=1', 'ductT removed, overlay kept');
-  // Now again on the default time: still no ductT, nothing else written.
+  assert.strictEqual(s.ctx.location.hash, '#/map?lat=52&duct=1', 'duct_t removed, overlay kept');
+  // Now again on the default time: still no duct_t, nothing else written.
   const n = s.replaced.length;
   L0._nowEl.fire('click'); s.flush();
   assert.strictEqual(s.replaced.length, n);
@@ -3834,9 +3870,10 @@ test('grid: Open-Meteo source keeps the old path (/api/ducting, edge line, no li
   assert.ok(map._controls.map(c => c._container.textContent).join('\n').indexOf('edge of the forecast area') >= 0);
   assert.strictEqual(layer._tl.attrs['aria-label'], 'Ducting forecast time');
   assert.strictEqual(layer._timePrefix.textContent, 'Forecast time: ');
+  // The deep link is the same one in both modes (#2459).
   layer._tl.fire('keydown', { key: 'Home' });
   s.flush();
-  assert.deepStrictEqual(s.replaced, [], 'no deep link written in Open-Meteo mode');
+  assert.deepStrictEqual(s.replaced, ['#/map?duct=1&duct_t=' + SAMPLE.times[0]]);
 });
 
 // Not a gate (wall-clock asserts are flaky in CI): prints how long one
@@ -3922,6 +3959,467 @@ test('MC_buildOverlayLayer: kind ducting calls the factory; absent factory -> nu
 test('factory without Leaflet returns null instead of throwing', () => {
   const s = makeSandbox({ noLeaflet: true });
   assert.strictEqual(s.ctx.MC_createDuctingLayer({}), null);
+});
+
+// ── deep link (#2459): duct / duct_t in the URL hash ────────────────────────
+
+const HOUR = 3600;
+const T30 = T0 + 30 * HOUR;
+
+test('URLState.parseDuctLink: duct=1, duct_t (implies on), only on the picker routes', () => {
+  const p = (h) => { const r = URLState.parseDuctLink(h); return [r.on, r.t]; };
+  assert.deepStrictEqual(p('#/map?duct=1'), [true, null]);
+  assert.deepStrictEqual(p('#/live?duct_t=' + T30), [true, T30], 'duct_t alone turns it on');
+  assert.deepStrictEqual(p('#/tools/planner?mode=area&duct=1&duct_t=' + T30 + '&r=30'), [true, T30]);
+  assert.deepStrictEqual(p('#/map?lat=1&lon=2'), [false, null]);
+  assert.deepStrictEqual(p('#/map'), [false, null]);
+  ['#/map?duct=0', '#/map?duct=true', '#/map?duct=', '#/map?duct=11', '#/map?Duct=1'].forEach((h) => {
+    assert.deepStrictEqual(p(h), [false, null], h);
+  });
+  // Not a page with a layer picker.
+  ['#/nodes?duct=1', '#/packets?duct_t=' + T30, '#/map/x?duct=1', '#/tools/trace?duct=1', '#/tools?duct=1', '', null, undefined, '#/'].forEach((h) => {
+    assert.deepStrictEqual(p(h), [false, null], String(h));
+  });
+});
+
+test('URLState.parseDuctLink: an unaligned, out-of-range or garbage duct_t is no hour (and turns nothing on by itself)', () => {
+  const bad = [String(T30 + 1), String(T30 - 1800), 'abc', '', '-3600', '3600.5', '1e5', '0', '0x1c20', ' 3600', '3600 ',
+    '99999999999999999999', '360000000000', 'NaN', 'Infinity'];
+  bad.forEach((v) => {
+    const q = encodeURIComponent(v);
+    let r = URLState.parseDuctLink('#/map?duct_t=' + q);
+    assert.deepStrictEqual([r.on, r.t], [false, null], 'alone: ' + v);
+    r = URLState.parseDuctLink('#/map?duct=1&duct_t=' + q);
+    assert.deepStrictEqual([r.on, r.t], [true, null], 'with duct=1: ' + v);
+  });
+  assert.strictEqual(URLState.parseDuctLink('#/map?duct_t=3600').t, 3600, 'the smallest hour');
+  assert.strictEqual(URLState.parseDuctLink('#/map?duct_t=' + (T30 + HOUR)).t, T30 + HOUR);
+});
+
+test('URLState.ductLinkHash: sets and removes duct / duct_t, every other parameter kept as written', () => {
+  const f = URLState.ductLinkHash;
+  assert.strictEqual(f('#/map', true, null), '#/map?duct=1');
+  assert.strictEqual(f('#/map?lat=1.5&lon=-2&zoom=7', true, null), '#/map?lat=1.5&lon=-2&zoom=7&duct=1');
+  assert.strictEqual(f('#/live?node=ab', true, T30), '#/live?node=ab&duct=1&duct_t=' + T30);
+  assert.strictEqual(f('#/map?duct=1&duct_t=' + T30 + '&zoom=7', true, T30 + HOUR), '#/map?zoom=7&duct=1&duct_t=' + (T30 + HOUR), 'replaced, not repeated');
+  assert.strictEqual(f('#/map?duct=1&duct_t=' + T30 + '&zoom=7', true, null), '#/map?zoom=7&duct=1', 'Now: only the hour goes');
+  assert.strictEqual(f('#/map?zoom=7&duct_t=' + T30 + '&duct=1', false, T30), '#/map?zoom=7', 'off removes both');
+  assert.strictEqual(f('#/map?duct=1', false, null), '#/map');
+  assert.strictEqual(f('#/map?duct=1&duct=1&duct_t=5&duct_t=6', false, null), '#/map', 'repeated keys all go');
+  // Other parameters are not re-encoded or reordered.
+  const odd = 'packet=AB12&paths=a1-b2-c3&node=x%20y+z&a=30.1,-97.2&e=&flag&%64uct_x=1';
+  assert.strictEqual(f('#/map?' + odd, true, T30), '#/map?' + odd + '&duct=1&duct_t=' + T30);
+  assert.strictEqual(f('#/tools/planner?' + odd + '&duct=1', false, null), '#/tools/planner?' + odd);
+  // An encoded key is still the key.
+  assert.strictEqual(f('#/map?%64uct=1&z=1', false, null), '#/map?z=1');
+  // Not an hour: never written.
+  assert.strictEqual(f('#/map', true, T30 + 1), '#/map?duct=1');
+  assert.strictEqual(f('#/map', true, 'x'), '#/map?duct=1');
+  assert.strictEqual(f('#/map', true, -3600), '#/map?duct=1');
+  // Not a picker route: nothing to write.
+  ['#/nodes?x=1', '#/packets', '', '#/map/abc', null].forEach((h) => assert.strictEqual(f(h, true, T30), null, String(h)));
+  // What is written is read back.
+  const r = URLState.parseDuctLink(f('#/live?node=ab', true, T30));
+  assert.deepStrictEqual([r.on, r.t], [true, T30]);
+});
+
+test('MC_ductLinkOverlays: the ids a link turns on for this page view', () => {
+  let s = makeSandbox({ hash: '#/map?duct=1' });
+  assert.deepStrictEqual(Array.from(s.ctx.MC_ductLinkOverlays()), ['ducting']);
+  s = makeSandbox({ hash: '#/live?duct_t=' + T30 });
+  assert.deepStrictEqual(Array.from(s.ctx.MC_ductLinkOverlays()), ['ducting']);
+  s = makeSandbox({ hash: '#/map?zoom=3' });
+  assert.deepStrictEqual(Array.from(s.ctx.MC_ductLinkOverlays()), []);
+  s = makeSandbox({ hash: '#/nodes?duct=1' });
+  assert.deepStrictEqual(Array.from(s.ctx.MC_ductLinkOverlays()), []);
+  s = makeSandbox();   // no location, no URLState
+  assert.deepStrictEqual(Array.from(s.ctx.MC_ductLinkOverlays()), []);
+});
+
+test('link: duct_t in the forecast is shown as a user pick; refreshes and the hour tick leave it; nothing is written', async () => {
+  const s = await mount(longBody(49), T0 + HOUR + 60, null, { hash: '#/map?zoom=5&duct=1&duct_t=' + T30 });
+  const L0 = s.layer;
+  assert.strictEqual(L0._idx, 30, 'the linked hour, not the current one (1)');
+  assert.strictEqual(L0._userPicked, true);
+  assert.strictEqual(L0._tl.attrs['aria-valuenow'], '30');
+  assert.strictEqual(L0._tl.scrollLeft, xsOf(s)[30], 'strip at the linked hour');
+  s.settleScroll(); s.runTimeouts();
+  assert.strictEqual(L0._idx, 30);
+  const realNow = Date.now;
+  try {
+    // The hour turns.
+    Date.now = () => (T0 + 2 * HOUR) * 1000 + 500;
+    s.runHourTick();
+    assert.strictEqual(L0._idx, 30, 'the hour tick does not move it');
+    // A refresh brings a new forecast.
+    s.timers[0].fn();
+    const body = longBody(49);
+    body.generatedAt = SAMPLE.generatedAt + HOUR;
+    s.api.calls[1].ok(body);
+    await tick(); await tick();
+    assert.strictEqual(L0._data.generatedAt, body.generatedAt);
+    assert.strictEqual(L0._idx, 30, 'a refresh does not move it');
+    assert.ok(L0._userPicked);
+  } finally { Date.now = realNow; }
+  s.settleScroll(); s.runTimeouts();
+  assert.deepStrictEqual(s.writes, [], 'reading a link writes nothing');
+  assert.strictEqual(s.ctx.location.hash, '#/map?zoom=5&duct=1&duct_t=' + T30);
+});
+
+test('link: duct_t outside the forecast, unaligned or garbage shows the current hour, not user-picked', async () => {
+  for (const v of [T0 + 49 * HOUR, T0 - HOUR, T30 + 60, 'abc', '']) {
+    const hash = '#/map?duct=1&duct_t=' + v;
+    const s = await mount(longBody(49), T0 + 5 * HOUR + 60, null, { hash });
+    assert.strictEqual(s.layer._idx, 5, 'current hour for duct_t=' + v);
+    assert.strictEqual(s.layer._userPicked, false, 'not a user pick for duct_t=' + v);
+    // It follows the clock.
+    const realNow = Date.now;
+    try {
+      Date.now = () => (T0 + 6 * HOUR) * 1000 + 500;
+      s.runHourTick();
+      assert.strictEqual(s.layer._idx, 6);
+    } finally { Date.now = realNow; }
+    s.settleScroll(); s.runTimeouts();
+    assert.deepStrictEqual(s.writes, []);
+    assert.strictEqual(s.ctx.location.hash, hash, 'the hash is left alone');
+  }
+});
+
+test('link: duct_t is applied when the forecast arrives (pending first), once only', async () => {
+  const s = makeSandbox({ hash: '#/live?duct_t=' + T30 });
+  const realNow = Date.now;
+  Date.now = () => (T0 + 60) * 1000;
+  try {
+    const map = makeMap();
+    const layer = s.ctx.MC_createDuctingLayer({});
+    layer.onAdd(map);
+    s.api.calls[0].ok({ status: 'pending' });
+    await tick(); await tick();
+    assert.strictEqual(layer._idx, -1);
+    s.timers[0].fn();
+    s.api.calls[1].ok(longBody(49));
+    await tick(); await tick();
+    assert.strictEqual(layer._idx, 30);
+    assert.ok(layer._userPicked);
+    // Now, then a new forecast: the link is not applied a second time.
+    layer._nowEl.fire('click');
+    assert.strictEqual(layer._idx, 0);
+    s.timers[0].fn();
+    const body = longBody(49);
+    body.generatedAt = SAMPLE.generatedAt + HOUR;
+    s.api.calls[2].ok(body);
+    await tick(); await tick();
+    assert.strictEqual(layer._idx, 0);
+    assert.ok(!layer._userPicked);
+  } finally { Date.now = realNow; }
+});
+
+test('link: without a link (or off the picker routes) the current hour is shown and picks write nothing', async () => {
+  for (const hash of ['#/nodes?duct=1&duct_t=' + T30, '#/packets']) {
+    const s = await mount(longBody(49), T0 + 60, null, { hash });
+    assert.strictEqual(s.layer._idx, 0);
+    assert.ok(!s.layer._userPicked);
+    const before = s.uiTimeouts().length;
+    s.layer._tl.fire('keydown', { key: 'End' });
+    s.layer.mcUserToggle(true);
+    s.settleScroll(); s.runTimeouts();
+    assert.deepStrictEqual(s.writes, []);
+    assert.strictEqual(s.ctx.location.hash, hash);
+    assert.strictEqual(before, 0);
+  }
+});
+
+test('link writes: a picked hour sets duct=1 and duct_t once it has settled, with replaceState, other parameters kept', async () => {
+  const s = await mount(longBody(49), T0 + 60, null, { hash: '#/map?lat=1.5&lon=-2&zoom=7&node=x%20y' });
+  const L0 = s.layer, vp = L0._tl;
+  const key = (k) => vp.fire('keydown', { key: k });
+  key('ArrowRight'); key('ArrowRight'); key('ArrowRight');
+  assert.deepStrictEqual(s.writes, [], 'nothing per key');
+  s.settleScroll(); s.runTimeouts();
+  assert.deepStrictEqual(s.writes, ['#/map?lat=1.5&lon=-2&zoom=7&node=x%20y&duct=1&duct_t=' + (T0 + 3 * HOUR)], 'one write for three keys');
+  assert.strictEqual(s.pushes, 0, 'no history entry');
+  // The buttons.
+  L0._nextEl.fire('click');
+  s.settleScroll(); s.runTimeouts();
+  assert.strictEqual(s.ctx.location.hash, '#/map?lat=1.5&lon=-2&zoom=7&node=x%20y&duct=1&duct_t=' + (T0 + 4 * HOUR));
+  assert.strictEqual(s.writes.length, 2);
+  // Picking the hour already in the hash writes nothing new.
+  key('ArrowRight'); key('ArrowLeft');
+  s.settleScroll(); s.runTimeouts();
+  assert.strictEqual(s.writes.length, 2);
+});
+
+test('link writes: a scrolled strip writes once when it settles, not per scroll event', async () => {
+  const s = await mount(longBody(49), T0 + 60, null, { hash: '#/tools/planner?mode=area' });
+  const L0 = s.layer, vp = L0._tl, xs = xsOf(s);
+  s.settleScroll(); s.runTimeouts();
+  vp.fire('touchstart');
+  for (const i of [3, 5, 8, 12]) {
+    vp.scrollLeft = xs[i] + 1;
+    s.settleScroll();
+    assert.strictEqual(L0._idx, i);
+    assert.deepStrictEqual(s.writes, [], 'no write while scrolling (hour ' + i + ')');
+  }
+  vp.fire('touchend');
+  s.runTimeouts(); s.settleScroll(); s.runTimeouts();
+  assert.deepStrictEqual(s.writes, ['#/tools/planner?mode=area&duct=1&duct_t=' + (T0 + 12 * HOUR)]);
+});
+
+test('link writes: Now removes duct_t and keeps duct=1', async () => {
+  const s = await mount(longBody(49), T0 + 10 * HOUR + 60, null, { hash: '#/live?node=ab&duct=1&duct_t=' + T30 });
+  const L0 = s.layer;
+  assert.strictEqual(L0._idx, 30);
+  const realNow = Date.now;
+  Date.now = () => (T0 + 10 * HOUR + 60) * 1000;
+  try { L0._nowEl.fire('click'); } finally { Date.now = realNow; }
+  assert.strictEqual(L0._idx, 10);
+  s.settleScroll(); s.runTimeouts();
+  assert.deepStrictEqual(s.writes, ['#/live?node=ab&duct=1']);
+});
+
+test('link writes: the clock, a refresh and a dropped pick never write', async () => {
+  const s = await mount(longBody(49), T0 + 60, null, { hash: '#/map?zoom=7' });
+  const L0 = s.layer;
+  const realNow = Date.now;
+  try {
+    Date.now = () => (T0 + HOUR) * 1000 + 500;
+    s.runHourTick();
+    assert.strictEqual(L0._idx, 1, 'the hour tick moved the hour');
+    s.settleScroll(); s.runTimeouts();
+    Date.now = () => (T0 + 2 * HOUR) * 1000 + 500;
+    s.timers[0].fn();
+    s.api.calls[1].ok(longBody(49));          // same generatedAt: the clock is followed
+    await tick(); await tick();
+    assert.strictEqual(L0._idx, 2, 'the refresh moved the hour');
+    s.settleScroll(); s.runTimeouts();
+    s.timers[0].fn();
+    const body = longBody(49);
+    body.generatedAt = SAMPLE.generatedAt + HOUR;
+    body.times = body.times.map(t => t + 3 * HOUR);
+    s.api.calls[2].ok(body);                  // a new forecast
+    await tick(); await tick();
+    s.settleScroll(); s.runTimeouts();
+    assert.deepStrictEqual(s.writes, []);
+    assert.strictEqual(s.ctx.location.hash, '#/map?zoom=7');
+    // A pick, written; then its hour leaves the forecast: the layer follows
+    // the clock again, and that move is not written either.
+    L0._tl.fire('keydown', { key: 'Home' });
+    s.settleScroll(); s.runTimeouts();
+    assert.strictEqual(s.writes.length, 1);
+    s.timers[0].fn();
+    const later = longBody(49);
+    later.generatedAt = SAMPLE.generatedAt + 2 * HOUR;
+    later.times = later.times.map(t => t + 10 * HOUR);
+    s.api.calls[3].ok(later);
+    await tick(); await tick();
+    assert.ok(!L0._userPicked);
+    s.settleScroll(); s.runTimeouts();
+    assert.strictEqual(s.writes.length, 1);
+  } finally { Date.now = realNow; }
+});
+
+test('link writes: the user turning the overlay on or off sets or removes duct (and duct_t) at once; a teardown writes nothing', async () => {
+  const s = await mount(longBody(49), T0 + 60, null, { hash: '#/map?zoom=7' });
+  const L0 = s.layer;
+  L0.mcUserToggle(true);
+  assert.deepStrictEqual(s.writes, ['#/map?zoom=7&duct=1']);
+  L0._tl.fire('keydown', { key: 'End' });
+  s.settleScroll(); s.runTimeouts();
+  assert.strictEqual(s.ctx.location.hash, '#/map?zoom=7&duct=1&duct_t=' + (T0 + 48 * HOUR));
+  // Off while a pick is waiting to be written: the pick is not written after it.
+  L0._tl.fire('keydown', { key: 'Home' });
+  L0.onRemove(s.map);
+  L0.mcUserToggle(false);
+  assert.strictEqual(s.ctx.location.hash, '#/map?zoom=7');
+  s.runTimeouts();
+  assert.strictEqual(s.ctx.location.hash, '#/map?zoom=7');
+  assert.strictEqual(s.timeouts.length, 0, 'no timer left');
+  // Back on by the user: the kept pick is in the link again.
+  const n = s.writes.length;
+  L0.onAdd(s.map);
+  L0.mcUserToggle(true);
+  assert.ok(L0._userPicked && L0._idx === 0);
+  assert.strictEqual(s.ctx.location.hash, '#/map?zoom=7&duct=1&duct_t=' + T0);
+  assert.strictEqual(s.writes.length, n + 1);
+  // The page going away (or the overlay set removing the layer) is not the user.
+  L0._tl.fire('keydown', { key: 'End' });
+  L0.onRemove(s.map);
+  s.runTimeouts();
+  assert.strictEqual(s.ctx.location.hash, '#/map?zoom=7&duct=1&duct_t=' + T0);
+  assert.strictEqual(s.writes.length, n + 1);
+});
+
+test('link writes: a pick still waiting when the page changes is not written into the next page\'s hash', async () => {
+  const s = await mount(longBody(49), T0 + 60, null, { hash: '#/map?zoom=7' });
+  s.layer._tl.fire('keydown', { key: 'End' });
+  // The user follows a link to Live; the map page is not torn down yet.
+  s.ctx.location.hash = '#/live?node=ab';
+  s.settleScroll(); s.runTimeouts();
+  assert.deepStrictEqual(s.writes, []);
+  assert.strictEqual(s.ctx.location.hash, '#/live?node=ab');
+});
+
+test('link writes: a throwing or missing history never breaks a pick', async () => {
+  const s = await mount(longBody(49), T0 + 60, null, { hash: '#/map' });
+  s.ctx.history.replaceState = () => { throw new Error('SecurityError'); };
+  s.layer._tl.fire('keydown', { key: 'End' });
+  assert.doesNotThrow(() => { s.settleScroll(); s.runTimeouts(); });
+  assert.doesNotThrow(() => s.layer.mcUserToggle(false));
+  delete s.ctx.history;
+  assert.doesNotThrow(() => s.layer.mcUserToggle(true));
+  assert.strictEqual(s.layer._idx, 48);
+});
+
+// The real overlay set (map-tile-providers.js MC_attachAutoTiles) with a
+// stand-in ducting layer: what a link's duct=1 does to the map and to the
+// saved overlay preference.
+function makeAttach(opts) {
+  opts = opts || {};
+  const listeners = {};
+  const store = Object.assign({}, opts.store);
+  const sets = [];
+  const toggles = [];
+  const controls = [];
+  const w = {
+    addEventListener(t, f) { (listeners[t] = listeners[t] || []).push(f); },
+    removeEventListener(t, f) { listeners[t] = (listeners[t] || []).filter(x => x !== f); },
+    dispatchEvent(ev) { (listeners[ev.type] || []).slice().forEach(f => f(ev)); return true; },
+    matchMedia: () => ({ matches: false }),
+    localStorage: {
+      getItem: (k) => (k in store ? store[k] : null),
+      setItem: (k, v) => { sets.push(k); store[k] = String(v); },
+      removeItem: (k) => { sets.push(k); delete store[k]; },
+    },
+  };
+  const ctx = {
+    console: { log() {}, error() {}, warn() {} },
+    JSON, Date, Math, Object, Array, String, Number, Boolean, isFinite,
+    setTimeout: (fn) => { fn(); return 0; }, clearTimeout() {},
+    CustomEvent: function (type, init) { this.type = type; this.detail = (init && init.detail) || null; },
+    document: { documentElement: { getAttribute: () => null }, querySelector: () => null, createElement: makeEl },
+    window: w,
+  };
+  w.document = ctx.document;
+  const group = () => {
+    const g = { kind: 'group', _layers: [] };
+    g.addLayer = (l) => { g._layers.push(l); return g; };
+    g.removeLayer = (l) => { g._layers = g._layers.filter(x => x !== l); return g; };
+    g.hasLayer = (l) => g._layers.includes(l);
+    g.getLayers = () => g._layers.slice();
+    g.addTo = (m) => { m.addLayer(g); return g; };
+    g.on = () => g;
+    return g;
+  };
+  ctx.L = w.L = {
+    tileLayer: (url, o) => { const t = { kind: 'tile', _url: url, options: Object.assign({}, o) }; t.on = () => t; t.setUrl = () => t; return t; },
+    layerGroup: group,
+    control: {
+      layers(base, overlays) {
+        const c = { base, overlays, addTo() { return c; }, remove() { return c; }, getContainer: () => ({ querySelectorAll: () => [] }) };
+        controls.push(c);
+        return c;
+      },
+    },
+  };
+  vm.createContext(ctx);
+  if (opts.cfg !== false) w.MC_DUCTING_CFG = { attribution: 'Weather data by X' };
+  w.MC_MAP_CFG = { tiles: { providers: { eox: { enabled: true } } } };
+  w.MC_createDuctingLayer = () => ({ kind: 'ducting-layer', mcUserToggle(on) { toggles.push(on); } });
+  vm.runInContext(PROV, ctx);
+  const map = { _layers: [], _handlers: {}, _panes: { tilePane: { style: {}, setAttribute() {}, removeAttribute() {}, getAttribute: () => null } } };
+  map.getPane = (n) => map._panes[n] || null;
+  map.createPane = (n) => { map._panes[n] = { style: {} }; return map._panes[n]; };
+  map.addLayer = (l) => { if (!map._layers.includes(l)) map._layers.push(l); return map; };
+  map.removeLayer = (l) => { map._layers = map._layers.filter(x => x !== l); return map; };
+  map.hasLayer = (l) => map._layers.includes(l);
+  map.on = (e, f) => { map._handlers[e] = f; return map; };
+  map.off = (e, f) => { if (map._handlers[e] === f) delete map._handlers[e]; return map; };
+  map.attributionControl = { addAttribution() {}, removeAttribution() {}, _update() {} };
+  const duct = () => map._layers.filter(l => l.kind === 'ducting-layer');
+  // What Leaflet's control does for a click on the ducting checkbox.
+  const userClick = (on) => {
+    const c = controls[controls.length - 1], l = c.overlays.ducting;
+    if (on) map.addLayer(l); else map.removeLayer(l);
+    map._handlers[on ? 'overlayadd' : 'overlayremove']({ type: on ? 'overlayadd' : 'overlayremove', name: 'ducting', layer: l });
+  };
+  return { w, map, store, sets, toggles, controls, duct, userClick };
+}
+const PREF = 'mc-tile-overlays';
+
+test('viewOverlays: a link shows the overlay for this page view and never writes the saved overlay preference', () => {
+  for (const saved of [undefined, '["eox-labels"]', '[]']) {
+    const a = makeAttach({ store: saved === undefined ? {} : { [PREF]: saved } });
+    const h = a.w.MC_attachAutoTiles(a.map, { controlPosition: 'topleft', viewOverlays: ['ducting'] });
+    assert.strictEqual(a.duct().length, 1, 'the ducting layer is on the map');
+    assert.strictEqual(a.store[PREF], saved, 'preference as it was');
+    assert.deepStrictEqual(a.sets, [], 'localStorage never written');
+    assert.ok(!Array.from(a.w.MC_getTileOverlays()).includes('ducting'), 'not a saved pick');
+    // Another overlay ticked or unticked (here or in another tab) keeps it.
+    a.w.MC_setTileOverlay('eox-labels-dark', true);
+    a.w.MC_setTileOverlay('eox-labels-dark', false);
+    a.w.dispatchEvent({ type: 'storage', key: PREF });
+    assert.strictEqual(a.duct().length, 1);
+    assert.ok(!JSON.parse(a.store[PREF]).includes('ducting'), 'still not saved');
+    assert.deepStrictEqual(a.toggles, [], 'the set adding the layer is not the user');
+    h.destroy();
+    assert.strictEqual(a.duct().length, 0, 'gone with the page');
+    assert.deepStrictEqual(a.toggles, []);
+    assert.ok(!JSON.parse(a.store[PREF]).includes('ducting'));
+  }
+});
+
+test('viewOverlays: without one, and without a picker, the preference alone decides', () => {
+  let a = makeAttach();
+  a.w.MC_attachAutoTiles(a.map, { controlPosition: 'topleft' });
+  assert.strictEqual(a.duct().length, 0);
+  a = makeAttach({ store: { [PREF]: '["ducting"]' } });
+  a.w.MC_attachAutoTiles(a.map, { controlPosition: 'topleft', viewOverlays: [] });
+  assert.strictEqual(a.duct().length, 1);
+  a = makeAttach();
+  a.w.MC_attachAutoTiles(a.map, { viewOverlays: ['ducting'] });
+  assert.strictEqual(a.duct().length, 0, 'no picker, no overlays');
+  a = makeAttach();
+  assert.doesNotThrow(() => a.w.MC_attachAutoTiles(a.map, { controlPosition: 'topleft', viewOverlays: ['nope', 5, null, '__proto__', 'ducting'] }));
+  assert.strictEqual(a.duct().length, 1, 'unknown ids are ignored');
+  assert.deepStrictEqual(a.sets, []);
+});
+
+test('viewOverlays: ignored while the server has ducting off; applied when the config brings it', () => {
+  const a = makeAttach({ cfg: false });
+  a.w.MC_attachAutoTiles(a.map, { controlPosition: 'topleft', viewOverlays: ['ducting'] });
+  assert.ok(!('ducting' in a.w.MC_TILE_OVERLAYS));
+  assert.strictEqual(a.duct().length, 0);
+  a.w.MC_setTileOverlay('eox-labels', true);
+  assert.strictEqual(a.duct().length, 0);
+  assert.strictEqual(a.store[PREF], '["eox-labels"]');
+  // /api/config/client arrives with ducting.
+  a.w.MC_DUCTING_CFG = { attribution: 'Weather data by X' };
+  a.w.MC_initTileRegistry(true);
+  assert.strictEqual(a.duct().length, 1);
+  assert.strictEqual(a.store[PREF], '["eox-labels"]', 'still not saved');
+});
+
+test('viewOverlays: the user\'s own untick ends the link\'s choice; the layer hears user toggles only', () => {
+  const a = makeAttach();
+  a.w.MC_attachAutoTiles(a.map, { controlPosition: 'topleft', viewOverlays: ['ducting'] });
+  assert.strictEqual(a.duct().length, 1);
+  a.userClick(false);
+  assert.deepStrictEqual(a.toggles, [false]);
+  assert.strictEqual(a.duct().length, 0);
+  assert.deepStrictEqual(a.sets, [], 'it was never saved, so nothing to unsave');
+  // A later sync does not bring it back.
+  a.w.MC_setTileOverlay('eox-labels', true);
+  a.w.dispatchEvent({ type: 'storage', key: PREF });
+  assert.strictEqual(a.duct().length, 0);
+  // The user's own tick is a saved pick, as before.
+  a.userClick(true);
+  assert.deepStrictEqual(a.toggles, [false, true]);
+  assert.strictEqual(a.store[PREF], '["eox-labels","ducting"]');
+  // Another tab unticks it: mirrored, and not reported as this user's toggle.
+  a.store[PREF] = '["eox-labels"]';
+  a.w.dispatchEvent({ type: 'storage', key: PREF });
+  assert.strictEqual(a.duct().length, 0);
+  assert.deepStrictEqual(a.toggles, [false, true]);
 });
 
 // ── run ─────────────────────────────────────────────────────────────────────

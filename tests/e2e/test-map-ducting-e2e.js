@@ -747,6 +747,175 @@ async function run() {
       skip('planner page: a click inside the forecast area places a site', 'planner disabled on this server');
     }
 
+    // ── Deep link (#2459): duct / duct_t in the URL hash ──
+    // The saved overlay preference as the browser holds it (presetStorage
+    // writes '[]' on every load of these pages), the hash, the checkbox.
+    const linkState = (pg) => pg.evaluate(() => {
+      const inp = document.querySelector('label[data-tile-overlay-id="ducting"] input');
+      const tl = document.querySelector('.mc-duct-timeline');
+      return {
+        hash: location.hash, pref: localStorage.getItem('mc-tile-overlays'), checked: !!(inp && inp.checked),
+        idx: tl ? parseInt(tl.getAttribute('aria-valuenow'), 10) : -1, history: history.length,
+        label: (document.querySelector('.mc-duct-time-value') || {}).textContent || '',
+      };
+    });
+    const hashParams = (h) => new URLSearchParams(String(h).split('?')[1] || '');
+    const waitHash = async (pg, fn, arg, what) => {
+      await pg.waitForFunction(fn, arg, { timeout: 5000, polling: 50 }).catch(() => {});
+      const ok = await pg.evaluate(fn, arg);
+      assert(ok, `${what}: hash is ${await pg.evaluate(() => location.hash)}`);
+    };
+    const nowIdx = () => { let w = 0; const s = Date.now() / 1000; data.times.forEach((t, i) => { if (t <= s) w = i; }); return w; };
+    const LINK_IDX = 30;
+
+    await test('deep link: #/map?duct=1&duct_t=<hour> shows the overlay at that hour and leaves the saved overlay preference alone', async () => {
+      const dp = await track({ theme: 'light' });
+      const T = data.times[LINK_IDX];
+      assert(LINK_IDX !== nowIdx(), 'the linked hour is the current one; the test would prove nothing');
+      await gotoRoute(dp.page, `#/map?duct=1&duct_t=${T}`);
+      await waitCells(dp.page, data.cells.length);
+      await dp.page.waitForSelector('.mc-duct-timeline', { state: 'visible' });
+      const v = await settled(dp.page);
+      assert(v.idx === LINK_IDX, `shown hour ${v.idx}, want ${LINK_IDX}`);
+      assert(Math.abs(v.scrollLeft - v.xs[LINK_IDX]) <= 1, `strip not on the linked hour: ${v.scrollLeft} vs ${v.xs[LINK_IDX]}`);
+      const f = await fieldProblems(dp.page, data, LINK_IDX);
+      assert(!f.probs.length, 'field is not the linked hour\'s: ' + f.probs.slice(0, 3).join(' | '));
+      await sleep(600);   // longer than the link's write delay: reading must write nothing
+      const st = await linkState(dp.page);
+      assert(st.checked, 'the picker\'s ducting box is not ticked');
+      assert(st.pref === '[]', 'the link changed the saved overlay preference: ' + st.pref);
+      assert(st.hash === `#/map?duct=1&duct_t=${T}`, 'the hash changed on load: ' + st.hash);
+      assert(st.idx === LINK_IDX, 'the linked hour did not stay: ' + st.idx);
+      assert(!dp.page.__errors.length, dp.page.__errors.slice(0, 3).join(' | '));
+    });
+
+    await test('deep link: picking an hour moves duct_t, Now removes it, off removes both; other parameters stay and no history entry is added', async () => {
+      const dp = await track({ theme: 'light' });
+      const T = data.times[LINK_IDX], c0 = data.cells[0];
+      const view = `lat=${c0.lat}&lon=${c0.lon}&zoom=7`;
+      await gotoRoute(dp.page, `#/map?${view}&duct=1&duct_t=${T}`);
+      await waitCells(dp.page, data.cells.length);
+      await dp.page.waitForSelector('.mc-duct-timeline', { state: 'visible' });
+      await settled(dp.page);
+      const before = await linkState(dp.page);
+      assert(before.idx === LINK_IDX, 'precondition: linked hour shown, got ' + before.idx);
+      // Count the writes: the keys below must not write once each.
+      await dp.page.evaluate(() => {
+        window.__replaces = 0; window.__pushes = 0;
+        const r = history.replaceState.bind(history), p = history.pushState.bind(history);
+        history.replaceState = function () { window.__replaces++; return r.apply(null, arguments); };
+        history.pushState = function () { window.__pushes++; return p.apply(null, arguments); };
+      });
+      await setTime(dp.page, LINK_IDX + 3);
+      await waitHash(dp.page, (t) => location.hash.indexOf('duct_t=' + t) >= 0, data.times[LINK_IDX + 3], 'duct_t did not follow the picked hour');
+      let st = await linkState(dp.page);
+      assert(st.hash === `#/map?${view}&duct=1&duct_t=${data.times[LINK_IDX + 3]}`, 'other parameters changed: ' + st.hash);
+      const counts = await dp.page.evaluate(() => ({ r: window.__replaces, p: window.__pushes }));
+      assert(counts.r >= 1 && counts.r <= 3 && counts.p === 0, 'writes for three key presses: ' + JSON.stringify(counts));
+      assert(st.history === before.history, `history grew: ${before.history} -> ${st.history}`);
+      // Now: back to the current hour, the link no longer names one.
+      await dp.page.locator('.mc-duct-now').first().click();
+      await waitHash(dp.page, () => location.hash.indexOf('duct_t') < 0, null, 'Now left duct_t');
+      st = await linkState(dp.page);
+      assert(st.hash === `#/map?${view}&duct=1`, 'after Now: ' + st.hash);
+      assert((await settled(dp.page)).idx === nowIdx(), 'Now did not show the current hour');
+      // Off by the user: nothing of the link is left, and nothing was ever saved.
+      await setTime(dp.page, 5);
+      await waitHash(dp.page, (t) => location.hash.indexOf('duct_t=' + t) >= 0, data.times[5], 'duct_t did not follow');
+      await setOverlayUi(dp.page, false);
+      await dp.page.waitForFunction(() => !document.querySelector('.mc-duct-panel'), null, { timeout: 5000 });
+      st = await linkState(dp.page);
+      assert(st.hash === `#/map?${view}`, 'after switching off: ' + st.hash);
+      assert(st.pref === '[]', 'preference after switching off a linked overlay: ' + st.pref);
+      await sleep(500);
+      assert((await linkState(dp.page)).hash === `#/map?${view}`, 'a late write put the link back');
+      // On by the user: a saved pick as before, and in the link.
+      await setOverlayUi(dp.page, true);
+      await waitHash(dp.page, () => /[?&]duct=1(&|$)/.test(location.hash), null, 'switching on did not set duct');
+      st = await linkState(dp.page);
+      assert(st.pref === '["ducting"]', 'the user\'s own tick was not saved: ' + st.pref);
+      assert(hashParams(st.hash).get('zoom') === '7' && hashParams(st.hash).get('lat') === String(c0.lat), 'view parameters lost: ' + st.hash);
+      assert(st.history === before.history, `history grew: ${before.history} -> ${st.history}`);
+      assert(!dp.page.__errors.length, dp.page.__errors.slice(0, 3).join(' | '));
+    });
+
+    await test('deep link: an hour outside the forecast (or not a whole hour) shows the current hour; a saved overlay with no link writes nothing', async () => {
+      for (const t of [data.times[0] - 5 * 3600, data.times[LINK_IDX] + 60]) {
+        const dp = await track({ theme: 'light' });
+        await gotoRoute(dp.page, `#/map?duct=1&duct_t=${t}`);
+        await waitCells(dp.page, data.cells.length);
+        await dp.page.waitForSelector('.mc-duct-timeline', { state: 'visible' });
+        const v = await settled(dp.page);
+        assert(v.idx === nowIdx(), `duct_t=${t}: shown hour ${v.idx}, want the current one ${nowIdx()}`);
+        assert(!dp.page.__errors.length, dp.page.__errors.slice(0, 3).join(' | '));
+      }
+      const sp = await track({ theme: 'light', overlays: ['ducting'] });
+      await gotoRoute(sp.page, '#/map?zoom=6');
+      await waitCells(sp.page, data.cells.length);
+      await settled(sp.page);
+      await sleep(600);
+      const st = await linkState(sp.page);
+      assert(st.hash === '#/map?zoom=6' && st.idx === nowIdx(), 'no link, saved overlay: ' + JSON.stringify(st));
+    });
+
+    await test('deep link: ignored when the client config has no ducting', async () => {
+      const np = await track({ theme: 'light', stripDucting: true });
+      const hash = `#/map?duct=1&duct_t=${data.times[LINK_IDX]}`;
+      await gotoRoute(np.page, hash);
+      await openPicker(np.page);
+      await sleep(600);
+      const st = await pageState(np.page);
+      assert(!st.cells && !st.fields.length && !st.panels, 'overlay drawn from a link although the server has none');
+      const ls = await linkState(np.page);
+      assert(ls.hash === hash && ls.pref === '[]', 'hash or preference touched: ' + JSON.stringify(ls));
+      assert(!np.page.__errors.length, np.page.__errors.slice(0, 3).join(' | '));
+    });
+
+    await test('deep link: live page shows the linked hour and keeps its own parameters', async () => {
+      const lp = await track({ theme: 'light' });
+      const T = data.times[LINK_IDX];
+      await gotoRoute(lp.page, `#/live?duct_t=${T}`);
+      await waitCells(lp.page, data.cells.length);
+      await lp.page.waitForSelector('.mc-duct-timeline', { state: 'visible' });
+      assert((await settled(lp.page)).idx === LINK_IDX, 'live: linked hour not shown');
+      await setTime(lp.page, LINK_IDX - 1);
+      await waitHash(lp.page, (t) => location.hash.indexOf('duct_t=' + t) >= 0, data.times[LINK_IDX - 1], 'live: duct_t did not follow');
+      const st = await linkState(lp.page);
+      assert(st.hash === `#/live?duct=1&duct_t=${data.times[LINK_IDX - 1]}` && st.pref === '[]', 'live: ' + JSON.stringify(st));
+      assert(!lp.page.__errors.length, lp.page.__errors.slice(0, 3).join(' | '));
+    });
+
+    if (cfg.planner) {
+      await test('deep link: planner page shows the linked hour, and the link survives a change of mode', async () => {
+        const pp = await track({ theme: 'light' });
+        const T = data.times[LINK_IDX];
+        await gotoRoute(pp.page, `#/tools/planner?mode=coverage&duct=1&duct_t=${T}`);
+        await waitCells(pp.page, data.cells.length);
+        await pp.page.waitForSelector('.mc-duct-timeline', { state: 'visible' });
+        assert((await settled(pp.page)).idx === LINK_IDX, 'planner: linked hour not shown');
+        const modes = await pp.page.evaluate(() => Array.prototype.map.call(document.querySelectorAll('.mc-pl-tab'), b => b.dataset.mode));
+        const other = modes.find(m => m !== 'coverage');
+        assert(other, 'no other planner mode to switch to');
+        await pp.page.locator(`.mc-pl-tab[data-mode="${other}"]`).first().click();
+        await waitHash(pp.page, (m) => location.hash.indexOf('mode=' + m) >= 0, other, 'planner: mode did not change');
+        let p = hashParams((await linkState(pp.page)).hash);
+        assert(p.get('duct') === '1' && p.get('duct_t') === String(T), 'planner: a mode change dropped the link: ' + p.toString());
+        assert((await settled(pp.page)).idx === LINK_IDX, 'planner: the hour moved with the mode');
+        await setTime(pp.page, LINK_IDX + 1);
+        await waitHash(pp.page, (t) => location.hash.indexOf('duct_t=' + t) >= 0, data.times[LINK_IDX + 1], 'planner: duct_t did not follow');
+        p = hashParams((await linkState(pp.page)).hash);
+        assert(p.get('mode') === other, 'planner: mode lost on a pick: ' + p.toString());
+        // Back to the first mode: the newer hour, not the one put away with the mode.
+        await pp.page.locator('.mc-pl-tab[data-mode="coverage"]').first().click();
+        await waitHash(pp.page, () => location.hash.indexOf('mode=coverage') >= 0, null, 'planner: mode did not change back');
+        p = hashParams((await linkState(pp.page)).hash);
+        assert(p.get('duct_t') === String(data.times[LINK_IDX + 1]), 'planner: an old hour came back with the mode: ' + p.toString());
+        assert(!pp.page.__errors.length, pp.page.__errors.slice(0, 3).join(' | '));
+      });
+    } else {
+      skip('deep link: planner page shows the linked hour', 'planner disabled on this server');
+    }
+
     // ── Config / API states ──
     await test('without ducting in the client config there is no overlay entry', async () => {
       const np = await track({ theme: 'light', overlays: ['ducting'], stripDucting: true });
