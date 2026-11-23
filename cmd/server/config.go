@@ -43,6 +43,11 @@ type Config struct {
 	DBPath     string            `json:"dbPath"`
 	ListLimits *ListLimitsConfig `json:"listLimits"`
 
+	// LocationPrivacy serves approximate node positions (location_privacy.go).
+	// locFuzz is the validated fuzzer main installs with setLocationFuzzer.
+	LocationPrivacy *LocationPrivacyConfig `json:"locationPrivacy,omitempty"`
+	locFuzz         *locationFuzzer
+
 	// NodeBlacklist is a list of public keys to exclude from all API responses.
 	// Blacklisted nodes are hidden from node lists, search, detail, map, and stats.
 	// Use this to filter out trolls, nodes with offensive names, or nodes
