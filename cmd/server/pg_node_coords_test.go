@@ -34,7 +34,7 @@ func TestPgNodeCoordsFuzzed(t *testing.T) {
 		if la == storedLat && lo == storedLon {
 			t.Fatalf("%s served the stored position", name)
 		}
-		if wLa, wLo := fuzz.Fuzz(pgqPkA, storedLat, storedLon); la != wLa || lo != wLo {
+		if wLa, wLo, _ := fuzz.Fuzz(pgqPkA, storedLat, storedLon); la != wLa || lo != wLo {
 			t.Fatalf("%s served (%v, %v), want the fuzzed (%v, %v)", name, la, lo, wLa, wLo)
 		}
 	}
@@ -107,7 +107,7 @@ func TestPgNodeCoordsFuzzed(t *testing.T) {
 			sort.Slice(c, func(i, j int) bool { return c[i][0] < c[j][0] || (c[i][0] == c[j][0] && c[i][1] < c[j][1]) })
 			return c, err
 		})
-		wLa, wLo := fuzz.Fuzz(pgqPkA, storedLat, storedLon)
+		wLa, wLo, _ := fuzz.Fuzz(pgqPkA, storedLat, storedLon)
 		found := false
 		for _, c := range coords {
 			if c == [2]float64{storedLat, storedLon} {

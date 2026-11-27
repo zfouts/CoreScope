@@ -249,6 +249,9 @@ func (db *DB) ductingNodeCoords(visible func(n *nodeInfo) bool, now time.Time) (
 			continue // stale, or no usable timestamp
 		}
 		sLat, sLon := db.servedNodePos(pk, lat, lon)
+		if !sLat.Valid || !sLon.Valid {
+			continue // privacy on and no servable position (malformed key)
+		}
 		n := nodeInfo{PublicKey: pk, Name: name.String, Lat: sLat.Float64, Lon: sLon.Float64, HasGPS: true}
 		if fuzzed {
 			n.exactLat, n.exactLon, n.hasExact = lat.Float64, lon.Float64, true

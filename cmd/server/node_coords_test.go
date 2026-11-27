@@ -402,7 +402,7 @@ func TestDuctingNodeCoordsFuzzed(t *testing.T) {
 		for _, n := range nodes {
 			la, lo := n.lat, n.lon
 			if fz := db.locationFuzzer(); fz != nil {
-				la, lo = fz.Fuzz(n.pubkey, n.lat, n.lon)
+				la, lo, _ = fz.Fuzz(n.pubkey, n.lat, n.lon)
 			}
 			m[[2]float64{la, lo}] = true
 		}
@@ -440,6 +440,24 @@ func TestDuctingNodeCoordsFuzzed(t *testing.T) {
 			if c == [2]float64{n.lat, n.lon} {
 				t.Fatalf("stored position of %s served with privacy on", n.name)
 			}
+		}
+	}
+	// A node whose key is not 64 hex digits has no served position: it is
+	// left out, never placed at (0, 0).
+	if _, err := db.conn.Exec(`INSERT INTO nodes (public_key, name, lat, lon, last_seen) VALUES ('abcd', 'Short', 29.5, -97.5, ?)`,
+		now.Add(-time.Hour).Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	coords, err := db.ductingNodeCoords(nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(coords) != 3 {
+		t.Fatalf("privacy on with a malformed key: %d coords %v, want the 3 valid nodes", len(coords), coords)
+	}
+	for _, c := range coords {
+		if c == [2]float64{0, 0} {
+			t.Fatal("malformed key served at (0, 0)")
 		}
 	}
 }
